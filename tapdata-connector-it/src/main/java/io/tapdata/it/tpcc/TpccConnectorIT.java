@@ -2,14 +2,19 @@ package io.tapdata.it.tpcc;
 
 import io.tapdata.entity.event.TapBaseEvent;
 import io.tapdata.entity.event.TapEvent;
+import io.tapdata.entity.event.ddl.table.TapCreateTableEvent;
 import io.tapdata.entity.event.dml.TapRecordEvent;
+import io.tapdata.entity.schema.TapField;
 import io.tapdata.entity.schema.TapTable;
+import io.tapdata.entity.simplify.TapSimplify;
 import io.tapdata.it.UnderTest;
 import io.tapdata.it.performance.PerformanceConnectorIT;
 import io.tapdata.pdk.apis.consumer.StreamReadConsumer;
 import io.tapdata.pdk.apis.functions.connector.source.BatchCountFunction;
 import io.tapdata.pdk.apis.functions.connector.source.GetStreamOffsetFunction;
 import io.tapdata.pdk.apis.functions.connector.source.StreamReadFunction;
+import io.tapdata.pdk.apis.functions.connector.target.CreateTableV2Function;
+import io.tapdata.pdk.apis.functions.connector.target.DropTableFunction;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Tag;
@@ -40,6 +45,14 @@ public abstract class TpccConnectorIT extends PerformanceConnectorIT {
 
     protected abstract TpccAdapter createTpccAdapter();
 
+    protected StreamReadFunction tpccStreamReadFunction() {
+        return functions().getStreamReadFunction();
+    }
+
+    protected GetStreamOffsetFunction tpccGetStreamOffsetFunction() {
+        return functions().getGetStreamOffsetFunction();
+    }
+
     @Test
     @Tag("tpcc")
     @UnderTest("discoverSchema")
@@ -58,6 +71,66 @@ public abstract class TpccConnectorIT extends PerformanceConnectorIT {
             long actual = batchCount.count(nodeContext(), table);
             assertEquals(expected.get(normalize(tableName)).longValue(), actual,
                     "connector batchCount should match source count for " + tableName);
+        }
+    }
+
+    @Test
+    @Tag("tpcc")
+    @UnderTest("batchRead")
+    @DisplayName("TPCC full source rows are readable through batchRead")
+    void should_batch_read_all_tpcc_source_rows() throws Throwable {
+        ensurePrepared();
+        Map<String, TapTable> tables = discoverTpccTables();
+        Map<String, Long> expected = adapter().currentRowCounts();
+
+        for (String tableName : adapter().tableNames()) {
+            TapTable table = tables.get(normalize(tableName));
+            assertNotNull(table, "TPCC table should be discovered: " + tableName);
+            List<Map<String, Object>> rows = batchReadAll(table);
+            assertEquals(expected.get(normalize(tableName)).longValue(), rows.size(),
+                    "batchRead should return every TPCC row for " + tableName);
+        }
+    }
+
+    @Test
+    @Tag("tpcc")
+    @UnderTest("createTableV2")
+    @UnderTest("writeRecord")
+    @UnderTest("batchCount")
+    @DisplayName("TPCC rows can be written through the connector target APIs")
+    void should_write_tpcc_rows_to_target_tables() throws Throwable {
+        ensurePrepared();
+        Map<String, TapTable> sourceTables = discoverTpccTables();
+        CreateTableV2Function createTable = require(functions()::getCreateTableV2Function, "createTableV2");
+        DropTableFunction dropTable = require(functions()::getDropTableFunction, "dropTable");
+        BatchCountFunction batchCount = require(functions()::getBatchCountFunction, "batchCount");
+        List<TapTable> targetTables = new ArrayList<>();
+
+        try {
+            for (String tableName : adapter().tableNames()) {
+                TapTable sourceTable = sourceTables.get(normalize(tableName));
+                TapTable targetTable = targetTable(sourceTable);
+                targetTables.add(targetTable);
+                TapCreateTableEvent createEvent = TapSimplify.createTableEvent(targetTable);
+                createTable.createTable(nodeContext(), createEvent);
+
+                List<Map<String, Object>> rows = batchReadAll(sourceTable);
+                long inserted = 0L;
+                for (int from = 0; from < rows.size(); from += 1000) {
+                    int to = Math.min(from + 1000, rows.size());
+                    inserted += writeInsertEventsViaEngineCodec(rows.subList(from, to), targetTable);
+                }
+                assertEquals(rows.size(), inserted, "writeRecord should insert every TPCC row for " + tableName);
+                assertEquals(rows.size(), batchCount.count(nodeContext(), targetTable),
+                        "target TPCC row count should match source for " + tableName);
+            }
+        } finally {
+            for (int index = targetTables.size() - 1; index >= 0; index--) {
+                try {
+                    dropTable.dropTable(nodeContext(), TapSimplify.dropTableEvent(targetTables.get(index).getId()));
+                } catch (Throwable ignored) {
+                }
+            }
         }
     }
 
@@ -143,13 +216,24 @@ public abstract class TpccConnectorIT extends PerformanceConnectorIT {
         return tables;
     }
 
+    private TapTable targetTable(TapTable source) {
+        String targetName = "TIT_" + normalize(source.getName());
+        TapTable target = new TapTable(targetName, targetName);
+        for (TapField field : source.getNameFieldMap().values()) {
+            target.add(field.clone());
+        }
+        target.refreshPrimaryKeys();
+        registerTable(target);
+        return target;
+    }
+
     private Object currentOffset() throws Throwable {
-        GetStreamOffsetFunction getStreamOffset = require(functions()::getGetStreamOffsetFunction, "getStreamOffset");
+        GetStreamOffsetFunction getStreamOffset = require(this::tpccGetStreamOffsetFunction, "getStreamOffset");
         return getStreamOffset.getStreamOffset(nodeContext(), null);
     }
 
     private StreamCapture startStream(Map<String, TapTable> tables, Object offset) throws InterruptedException {
-        StreamReadFunction streamRead = require(functions()::getStreamReadFunction, "streamRead");
+        StreamReadFunction streamRead = require(this::tpccStreamReadFunction, "streamRead");
         List<String> tableIds = tables.values().stream().map(TapTable::getId).collect(Collectors.toList());
         StreamCapture capture = new StreamCapture();
         capture.consumer = StreamReadConsumer.create((events, callbackOffset) -> {
