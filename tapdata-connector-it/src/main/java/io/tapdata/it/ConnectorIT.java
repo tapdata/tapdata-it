@@ -302,6 +302,10 @@ public abstract class ConnectorIT {
         return 15L;
     }
 
+    protected boolean waitForStreamReadCatchUp() {
+        return false;
+    }
+
     protected void prepareStreamReadTable() throws Exception {
     }
 
@@ -1770,7 +1774,12 @@ public abstract class ConnectorIT {
         List<Map<String, Object>> expected = generateRows(incrementalCount);
         List<Map<String, Object>> received = Collections.synchronizedList(new ArrayList<>());
         CountDownLatch latch = new CountDownLatch(1);
+        CountDownLatch catchUpLatch = new CountDownLatch(1);
+        long catchUpTimestampSeconds = System.currentTimeMillis() / 1000L;
         StreamReadConsumer consumer = StreamReadConsumer.create((events, off) -> {
+            if (off instanceof Number && ((Number) off).longValue() >= catchUpTimestampSeconds) {
+                catchUpLatch.countDown();
+            }
             for (TapEvent e : events) {
                 if (e instanceof TapInsertRecordEvent) {
                     received.add(((TapInsertRecordEvent) e).getAfter());
@@ -1799,6 +1808,10 @@ public abstract class ConnectorIT {
         }
         assertNull(streamReadError.get(), () -> "streamRead thread terminated before startup: " + describeThrowable(streamReadError.get()));
         assertEquals(StreamReadConsumer.STATE_STREAM_READ_STARTED, consumer.getState(), "streamRead did not report started state");
+        if (waitForStreamReadCatchUp()) {
+            assertTrue(catchUpLatch.await(streamReadTimeoutSeconds(), TimeUnit.SECONDS),
+                    "streamRead did not catch up to " + catchUpTimestampSeconds + " before incremental writes");
+        }
         // 写增量数据：旁路直连写入并 count 确认（不经过 connector writeRecord；事实来源 = 对端库）
         bypassInsert(expected);
         boolean done = latch.await(streamReadTimeoutSeconds(), TimeUnit.SECONDS);
