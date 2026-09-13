@@ -245,6 +245,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # 拉取 Git LFS 内容：db2-connector 的 db2-runtime-client-*.tar.gz 由 LFS 管理，
+          # 不开 lfs 时工作区里只会是 LFS 指针文本，导致运行时 checksum 校验失败
+          lfs: true
 
       - name: Compute connector short name
         id: name
