@@ -13,6 +13,7 @@ import io.tapdata.pdk.apis.consumer.StreamReadConsumer;
 import io.tapdata.pdk.apis.functions.connector.source.BatchCountFunction;
 import io.tapdata.pdk.apis.functions.connector.source.GetStreamOffsetFunction;
 import io.tapdata.pdk.apis.functions.connector.source.StreamReadFunction;
+import io.tapdata.pdk.apis.functions.connector.source.TimestampToStreamOffsetFunction;
 import io.tapdata.pdk.apis.functions.connector.target.CreateTableV2Function;
 import io.tapdata.pdk.apis.functions.connector.target.DropTableFunction;
 import org.junit.jupiter.api.AfterAll;
@@ -61,7 +62,7 @@ public abstract class TpccConnectorIT extends PerformanceConnectorIT {
     void should_read_tpcc_schema_and_counts() throws Throwable {
         ensurePrepared();
         Map<String, TapTable> tables = discoverTpccTables();
-        Map<String, Long> expected = adapter().currentRowCounts();
+        Map<String, Long> expected = normalizedRowCounts();
         BatchCountFunction batchCount = require(functions()::getBatchCountFunction, "batchCount");
 
         assertEquals(adapter().tableNames().size(), tables.size(), "all TPCC tables should be discovered");
@@ -81,7 +82,7 @@ public abstract class TpccConnectorIT extends PerformanceConnectorIT {
     void should_batch_read_all_tpcc_source_rows() throws Throwable {
         ensurePrepared();
         Map<String, TapTable> tables = discoverTpccTables();
-        Map<String, Long> expected = adapter().currentRowCounts();
+        Map<String, Long> expected = normalizedRowCounts();
 
         for (String tableName : adapter().tableNames()) {
             TapTable table = tables.get(normalize(tableName));
@@ -138,6 +139,7 @@ public abstract class TpccConnectorIT extends PerformanceConnectorIT {
     @Tag("tpcc")
     @UnderTest("streamRead")
     @UnderTest("getStreamOffset")
+    @UnderTest("timestampToStreamOffset")
     @DisplayName("TPCC workload produces multi-table CDC events")
     void should_stream_tpcc_transactions() throws Throwable {
         ensurePrepared();
@@ -156,6 +158,7 @@ public abstract class TpccConnectorIT extends PerformanceConnectorIT {
     @Tag("tpcc")
     @UnderTest("streamRead")
     @UnderTest("getStreamOffset")
+    @UnderTest("timestampToStreamOffset")
     @DisplayName("TPCC workload can resume from a saved stream offset")
     void should_resume_tpcc_from_saved_offset() throws Throwable {
         ensurePrepared();
@@ -228,8 +231,13 @@ public abstract class TpccConnectorIT extends PerformanceConnectorIT {
     }
 
     private Object currentOffset() throws Throwable {
-        GetStreamOffsetFunction getStreamOffset = require(this::tpccGetStreamOffsetFunction, "getStreamOffset");
-        return getStreamOffset.getStreamOffset(nodeContext(), null);
+        GetStreamOffsetFunction getStreamOffset = tpccGetStreamOffsetFunction();
+        if (getStreamOffset != null) {
+            return getStreamOffset.getStreamOffset(nodeContext(), null);
+        }
+        TimestampToStreamOffsetFunction timestampToOffset = require(functions()::getTimestampToStreamOffsetFunction,
+                "getStreamOffset or timestampToStreamOffset");
+        return timestampToOffset.timestampToStreamOffset(nodeContext(), System.currentTimeMillis());
     }
 
     private StreamCapture startStream(Map<String, TapTable> tables, Object offset) throws InterruptedException {
@@ -314,6 +322,14 @@ public abstract class TpccConnectorIT extends PerformanceConnectorIT {
 
     private String normalize(String tableName) {
         return tableName == null ? null : tableName.toUpperCase();
+    }
+
+    private Map<String, Long> normalizedRowCounts() throws Exception {
+        Map<String, Long> normalized = new LinkedHashMap<>();
+        for (Map.Entry<String, Long> entry : adapter().currentRowCounts().entrySet()) {
+            normalized.put(normalize(entry.getKey()), entry.getValue());
+        }
+        return normalized;
     }
 
     private static final class StreamCapture {
