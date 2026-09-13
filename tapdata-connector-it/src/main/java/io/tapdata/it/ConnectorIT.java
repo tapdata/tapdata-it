@@ -298,6 +298,13 @@ public abstract class ConnectorIT {
         return 100;
     }
 
+    protected long streamReadTimeoutSeconds() {
+        return 15L;
+    }
+
+    protected void prepareStreamReadTable() throws Exception {
+    }
+
     /** 子类可覆写：测试表名前缀 */
     protected String tablePrefix() {
         return "_tap_it_";
@@ -1700,6 +1707,7 @@ public abstract class ConnectorIT {
     void should_alter_field_name() throws Throwable {
         AlterFieldNameFunction alterFieldName = require(functions()::getAlterFieldNameFunction, "alterFieldName");
         createTableIfNeeded();
+        prepareStreamReadTable();
         TapTable table = buildTapTable();
         registerTable(table);
         TapAlterFieldNameEvent event = new TapAlterFieldNameEvent()
@@ -1719,6 +1727,7 @@ public abstract class ConnectorIT {
     void should_alter_field_attributes() throws Throwable {
         AlterFieldAttributesFunction alter = require(functions()::getAlterFieldAttributesFunction, "alterFieldAttributes");
         createTableIfNeeded();
+        prepareStreamReadTable();
         TapTable table = buildTapTable();
         registerTable(table);
         TapAlterFieldAttributesEvent event = new TapAlterFieldAttributesEvent().fieldName("c_varchar")
@@ -1749,6 +1758,7 @@ public abstract class ConnectorIT {
         StreamReadFunction streamRead = require(functions()::getStreamReadFunction, "streamRead");
         TimestampToStreamOffsetFunction ts2offset = require(functions()::getTimestampToStreamOffsetFunction, "timestampToStreamOffset");
         createTableIfNeeded();
+        prepareStreamReadTable();
         TapTable table = buildTapTable();
         // 注册到 tableMap：引擎建表后 tableMap 必含该表；DB2 i 的 timestampToStreamOffset 依赖
         // tableMap 查系统表名（DISPLAY_JOURNAL 按真实 OBJECT_NAME 过滤），否则 offset 退化为 0
@@ -1782,9 +1792,16 @@ public abstract class ConnectorIT {
         }, "tap-it-stream-read");
         reader.setDaemon(true);
         reader.start();
+        long startDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(streamReadTimeoutSeconds());
+        while (consumer.getState() != StreamReadConsumer.STATE_STREAM_READ_STARTED
+                && streamReadError.get() == null && System.nanoTime() < startDeadline) {
+            Thread.sleep(50L);
+        }
+        assertNull(streamReadError.get(), () -> "streamRead thread terminated before startup: " + describeThrowable(streamReadError.get()));
+        assertEquals(StreamReadConsumer.STATE_STREAM_READ_STARTED, consumer.getState(), "streamRead did not report started state");
         // 写增量数据：旁路直连写入并 count 确认（不经过 connector writeRecord；事实来源 = 对端库）
         bypassInsert(expected);
-        boolean done = latch.await(15, TimeUnit.SECONDS);
+        boolean done = latch.await(streamReadTimeoutSeconds(), TimeUnit.SECONDS);
         // 断言 reader 线程未捕获异常：streamRead 内部错误（如 MySQL handleDatetime 拆箱 NPE）必须直接暴露为用例失败，
         // 而不是被吞掉后表现为“收不到增量”的超时失败，导致真实根因丢失
         assertNull(streamReadError.get(), () -> "streamRead thread terminated with error: " + describeThrowable(streamReadError.get()));
@@ -1849,7 +1866,7 @@ public abstract class ConnectorIT {
         reader.start();
         // 写增量数据：旁路直连写入并 count 确认（不经过 connector writeRecord；事实来源 = 对端库）
         bypassInsert(expected);
-        boolean done = latch.await(15, TimeUnit.SECONDS);
+        boolean done = latch.await(streamReadTimeoutSeconds(), TimeUnit.SECONDS);
         // 断言 reader 线程未捕获异常（同 should_stream_read_incremental：异步内部错误必须直接暴露）
         assertNull(streamReadError.get(), () -> "streamReadOneByOne thread terminated with error: " + describeThrowable(streamReadError.get()));
         assertTrue(done, "streamReadOneByOne did not receive " + incrementalCount + " records within 15s, got: " + received.size());
@@ -1901,7 +1918,7 @@ public abstract class ConnectorIT {
         reader.start();
         // 写增量数据：旁路直连写入并 count 确认（不经过 connector writeRecord；事实来源 = 对端库）
         bypassInsert(expected);
-        boolean done = latch.await(15, TimeUnit.SECONDS);
+        boolean done = latch.await(streamReadTimeoutSeconds(), TimeUnit.SECONDS);
         // 断言 reader 线程未捕获异常（同 should_stream_read_incremental：异步内部错误必须直接暴露）
         assertNull(streamReadError.get(), () -> "streamReadMultiConnection thread terminated with error: " + describeThrowable(streamReadError.get()));
         assertTrue(done, "streamReadMultiConnection did not receive records within 15s, got: " + received.size());
