@@ -3,6 +3,7 @@ package io.tapdata.it.performance;
 import io.tapdata.entity.schema.TapTable;
 
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 public interface PerformanceAdapter {
@@ -12,6 +13,10 @@ public interface PerformanceAdapter {
     void createTable() throws Exception;
 
     void insertRows(List<Map<String, Object>> rows) throws Exception;
+
+    default Map<String, Object> prepareWriteRecordRow(Map<String, Object> row) {
+        return new LinkedHashMap<>(row);
+    }
 
     default void insertRows(int count, long sequenceBase, int batchSize) throws Exception {
         for (int offset = 0; offset < count; offset += batchSize) {
