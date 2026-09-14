@@ -11,6 +11,7 @@ import io.tapdata.pdk.apis.consumer.StreamReadConsumer;
 import io.tapdata.pdk.apis.functions.connector.source.BatchReadFunction;
 import io.tapdata.pdk.apis.functions.connector.source.GetStreamOffsetFunction;
 import io.tapdata.pdk.apis.functions.connector.source.StreamReadFunction;
+import io.tapdata.pdk.apis.functions.connector.source.TimestampToStreamOffsetFunction;
 import io.tapdata.pdk.apis.functions.connector.target.WriteRecordFunction;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Tag;
@@ -41,6 +42,10 @@ public abstract class PerformanceConnectorIT extends ConnectorIT {
 
     protected PerformanceAdapter createPerformanceAdapter() {
         return null;
+    }
+
+    protected StreamReadFunction performanceStreamReadFunction() {
+        return functions().getStreamReadFunction();
     }
 
     @Test
@@ -78,13 +83,13 @@ public abstract class PerformanceConnectorIT extends ConnectorIT {
     @Tag("performance")
     @UnderTest("streamRead")
     @UnderTest("getStreamOffset")
+    @UnderTest("timestampToStreamOffset")
     @DisplayName("performance streamRead uses recordSize 100 on 1KB records")
     void should_measure_stream_read_performance() throws Throwable {
         preparePerformanceTable();
         PerformanceConfig config = config();
-        GetStreamOffsetFunction getStreamOffset = require(functions()::getGetStreamOffsetFunction, "getStreamOffset");
-        StreamReadFunction streamRead = require(functions()::getStreamReadFunction, "streamRead");
-        Object offset = getStreamOffset.getStreamOffset(nodeContext(), null);
+        StreamReadFunction streamRead = require(this::performanceStreamReadFunction, "streamRead");
+        Object offset = currentOffset();
         AtomicLong received = new AtomicLong();
         Set<Object> ids = ConcurrentHashMap.newKeySet();
         AtomicReference<Throwable> error = new AtomicReference<>();
@@ -130,6 +135,17 @@ public abstract class PerformanceConnectorIT extends ConnectorIT {
         }
     }
 
+    private Object currentOffset() throws Throwable {
+        GetStreamOffsetFunction getStreamOffset = functions().getGetStreamOffsetFunction();
+        if (getStreamOffset != null) {
+            return getStreamOffset.getStreamOffset(nodeContext(), null);
+        }
+        TimestampToStreamOffsetFunction timestampToOffset = require(
+                functions()::getTimestampToStreamOffsetFunction,
+                "getStreamOffset or timestampToStreamOffset");
+        return timestampToOffset.timestampToStreamOffset(nodeContext(), System.currentTimeMillis());
+    }
+
     @Test
     @Tag("performance")
     @UnderTest("writeRecord")
@@ -152,7 +168,8 @@ public abstract class PerformanceConnectorIT extends ConnectorIT {
                         List<Map<String, Object>> rows = PerformanceRows.create(config.getWriteBatchSize(), base);
                         List<TapRecordEvent> events = new ArrayList<>(rows.size());
                         for (Map<String, Object> row : rows) {
-                            events.add(TapSimplify.insertRecordEvent(row, adapter().table().getId()));
+                            events.add(TapSimplify.insertRecordEvent(adapter().prepareWriteRecordRow(row),
+                                    adapter().table().getId()));
                         }
                         AtomicLong batchInserted = new AtomicLong();
                         try {
