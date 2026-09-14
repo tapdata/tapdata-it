@@ -249,6 +249,23 @@ jobs:
           # 不开 lfs 时工作区里只会是 LFS 指针文本，导致运行时 checksum 校验失败
           lfs: true
 
+      - name: Materialize and verify Git LFS files
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 自托管 runner 复用同一提交的旧工作区时，checkout 不一定会重新 smudge 已存在的 LFS 指针。
+          git lfs checkout
+
+          if [[ '${{ matrix.connector }}' == 'connectors/db2-connector' ]]; then
+            RUNTIME='connectors/db2-connector/src/main/resources/db2-runtime/linux-x86_64/db2-runtime-client-11.5.9.tar.gz'
+            EXPECTED="$(tr -d '[:space:]' < "${RUNTIME}.sha256")"
+            ACTUAL="$(sha256sum "${RUNTIME}" | awk '{print $1}')"
+            [[ "${ACTUAL}" == "${EXPECTED}" ]] || {
+              echo "::error file=${RUNTIME}::DB2 runtime checksum mismatch after Git LFS checkout: expected ${EXPECTED}, actual ${ACTUAL}"
+              exit 1
+            }
+          fi
+
       - name: Compute connector short name
         id: name
         shell: bash
