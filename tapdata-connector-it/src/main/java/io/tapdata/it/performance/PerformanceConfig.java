@@ -38,15 +38,15 @@ public final class PerformanceConfig {
 
     public static PerformanceConfig fromSystemProperties() {
         return new PerformanceConfig(
-                integer("performance.batchRows", "PERFORMANCE_BATCH_ROWS", 1000000),
+                integer("performance.batchRows", "PERFORMANCE_BATCH_ROWS", 10000),
                 integer("performance.batchSize", "PERFORMANCE_BATCH_SIZE", 1000),
-                integer("performance.streamRows", "PERFORMANCE_STREAM_ROWS", 200000),
+                integer("performance.streamRows", "PERFORMANCE_STREAM_ROWS", 2000),
                 integer("performance.streamRecordSize", "PERFORMANCE_STREAM_RECORD_SIZE", 100),
-                integer("performance.prepareBatchSize", "PERFORMANCE_PREPARE_BATCH_SIZE", 10000),
-                integer("performance.writeThreads", "PERFORMANCE_WRITE_THREADS", 4),
-                integer("performance.writeBatchSize", "PERFORMANCE_WRITE_BATCH_SIZE", 500),
-                integer("performance.writeBatchesPerThread", "PERFORMANCE_WRITE_BATCHES_PER_THREAD", 100),
-                integer("performance.timeoutSeconds", "PERFORMANCE_TIMEOUT_SECONDS", 1800),
+                integer("performance.prepareBatchSize", "PERFORMANCE_PREPARE_BATCH_SIZE", 1000),
+                integer("performance.writeThreads", "PERFORMANCE_WRITE_THREADS", 2),
+                integer("performance.writeBatchSize", "PERFORMANCE_WRITE_BATCH_SIZE", 100),
+                integer("performance.writeBatchesPerThread", "PERFORMANCE_WRITE_BATCHES_PER_THREAD", 10),
+                integer("performance.timeoutSeconds", "PERFORMANCE_TIMEOUT_SECONDS", 300),
                 decimal("performance.minimumBatchRowsPerSecond", "PERFORMANCE_MINIMUM_BATCH_ROWS_PER_SECOND", 0D),
                 decimal("performance.minimumStreamRowsPerSecond", "PERFORMANCE_MINIMUM_STREAM_ROWS_PER_SECOND", 0D),
                 decimal("performance.minimumWriteRowsPerSecond", "PERFORMANCE_MINIMUM_WRITE_ROWS_PER_SECOND", 0D),
