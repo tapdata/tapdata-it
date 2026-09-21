@@ -1,0 +1,153 @@
+# TapData Server（TM：管理端 Web + REST API，监听 3030）。对外经 NodePort ${NODEPORT_TM} 暴露。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tapdata-server-config
+  labels:
+    app: tapdata-server
+    app.kubernetes.io/part-of: tapdata
+data:
+  license.txt: |
+    ${LICENSE}
+  application.yml: |
+    spring:
+      data:
+        mongodb:
+          uri: ""
+          ssl: 'false'
+          username: "${MONGO_USER}"
+          password: "${MONGO_PASSWORD}"
+          mongoConnectionString: '${MONGO_URI}'
+          authenticationDatabase: admin
+    tapdata:
+      metrics:
+        enable: true
+        enginePort: 3035
+        agentPort: 3036
+      cloud:
+        retryTime: 3
+        baseURLs: '${BACKEND_URL}'
+      mode: cluster
+      conf:
+        tapdataPort: '3030'
+        backendUrl: '${BACKEND_URL}'
+        apiServerPort: '3080'
+        SCRIPT_DIR: etc
+        reportInterval: 5000
+        Decimal128ToNumber: 'false'
+        responseOfTotalType: NUMBER
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tapdata-server
+  labels:
+    app: tapdata-server
+    app.kubernetes.io/part-of: tapdata
+spec:
+  replicas: ${TM_REPLICAS}
+  selector:
+    matchLabels:
+      app: tapdata-server
+  template:
+    metadata:
+      labels:
+        app: tapdata-server
+    spec:
+      ${IMAGE_PULL_SECRETS_BLOCK}
+      initContainers:
+        - name: wait-for-mongodb
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z -w 3 tapdata-mongodb 27017; do
+                echo "waiting for MongoDB..."; sleep 5;
+              done
+              echo "MongoDB reachable"
+      containers:
+        - name: tapdata-server
+          image: "${IMAGE}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3030
+              protocol: TCP
+          env:
+            - name: MODULE
+              value: "frontend"
+            - name: MONGODB_CONNECTION_STRING
+              value: "${MONGO_URI}"
+            - name: BACKENDURL
+              value: "${BACKEND_URL}"
+            - name: FRONTEND_WORKER_COUNT
+              value: "1"
+            - name: JAVA_VERSION
+              value: "${JAVA_VERSION}"
+            - name: TZ
+              value: "${TZ}"
+            - name: LICENSE_HOST
+              value: "${LICENSE_HOST}"
+            - name: TAPDATA_WORK_DIR
+              value: "/tapdata/apps"
+            - name: MONGODB_USER
+              value: "${MONGO_USER}"
+            - name: MONGODB_PASSWORD
+              value: "${MONGO_PASSWORD}"
+          command:
+            - /tapdata/docker-entrypoint.sh
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 40
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 150
+            periodSeconds: 20
+            failureThreshold: 5
+          resources:
+            limits:
+              cpu: "2"
+              memory: 4Gi
+            requests:
+              cpu: 500m
+              memory: 2Gi
+          volumeMounts:
+            - name: config
+              mountPath: /tapdata/apps/license.txt
+              subPath: license.txt
+            - name: logs
+              mountPath: /tapdata/apps/logs
+      volumes:
+        - name: config
+          configMap:
+            name: tapdata-server-config
+            items:
+              - key: license.txt
+                path: license.txt
+        - name: logs
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tapdata-server
+  labels:
+    app: tapdata-server
+    app.kubernetes.io/part-of: tapdata
+spec:
+  type: NodePort
+  ports:
+    - name: http
+      port: 3030
+      targetPort: 3030
+      nodePort: ${NODEPORT_TM}
+      protocol: TCP
+  selector:
+    app: tapdata-server

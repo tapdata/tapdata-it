@@ -18,6 +18,16 @@
         <tapdata.pdk.api.version>2.0.5-SNAPSHOT</tapdata.pdk.api.version>
         <junit.version>5.9.2</junit.version>
         <jackson.version>2.18.3</jackson.version>
+        <!-- DBForge 控制面 Java SDK：连接器 IT 经 DbForgeProvisioner 按需动态供应数据库（-Ddbforge.sdk.version= 可覆盖） -->
+        <dbforge.sdk.version>0.6.13-SNAPSHOT</dbforge.sdk.version>
+
+        <!-- L3 集成测试框架依赖版本 -->
+        <!-- fabric8 Kubernetes 客户端：动态在 k3s 部署完整产品、查询/分配 NodePort（6.x 单 artifact DSL 稳定） -->
+        <fabric8.version>6.10.0</fabric8.version>
+        <!-- 管理端 SDK（TmAvailableRestTemplate / 认证 / VersionHeaderInterceptor），来自 tapdata/manager/tm-sdk -->
+        <tm.sdk.version>1.0.4-SNAPSHOT</tm.sdk.version>
+        <!-- 管理端数据传输对象（TaskDto / DAG / DatabaseNode / Status），来自 tapdata/manager/tm-common -->
+        <tm.common.version>0.0.3-SNAPSHOT</tm.common.version>
     </properties>
 
     <!-- Nexus 公有云 maven-snapshots 仓库：tapdata-pdk-api、tapdata-api 等 SNAPSHOT
@@ -40,6 +50,10 @@
     <modules>
         <module>tapdata-it-common</module>
         <module>tapdata-connector-it</module>
+        <!-- L3 完整产品集成测试框架：框架本体 + 端到端用例 + 稳定性专项 -->
+        <module>product-it-core</module>
+        <module>product-e2e</module>
+        <module>product-stability</module>
     </modules>
 
     <distributionManagement>

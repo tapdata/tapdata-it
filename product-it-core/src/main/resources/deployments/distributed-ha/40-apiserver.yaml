@@ -1,0 +1,120 @@
+# TapData API Server（数据服务，监听 3080，MODULE=api）。对外经 NodePort ${NODEPORT_API} 暴露。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tapdata-apiserver-config
+  labels:
+    app: tapdata-apiserver
+    app.kubernetes.io/part-of: tapdata
+data:
+  application.yml: |
+    spring:
+      data:
+        mongodb:
+          uri: ""
+          ssl: 'false'
+          username: "${MONGO_USER}"
+          password: "${MONGO_PASSWORD}"
+          mongoConnectionString: '${MONGO_URI}'
+          authenticationDatabase: admin
+    tapdata:
+      mode: cluster
+      conf:
+        tapdataPort: '3030'
+        backendUrl: '${BACKEND_URL}'
+        apiServerPort: '3080'
+        SCRIPT_DIR: etc
+        apiWorkerMaxMemory: 512
+        Decimal128ToNumber: 'false'
+        responseOfTotalType: NUMBER
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tapdata-apiserver
+  labels:
+    app: tapdata-apiserver
+    app.kubernetes.io/part-of: tapdata
+spec:
+  replicas: ${API_REPLICAS}
+  selector:
+    matchLabels:
+      app: tapdata-apiserver
+  template:
+    metadata:
+      labels:
+        app: tapdata-apiserver
+    spec:
+      ${IMAGE_PULL_SECRETS_BLOCK}
+      initContainers:
+        - name: wait-for-tapdata-server
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z -w 3 tapdata-server 3030; do
+                echo "waiting for TapData Server..."; sleep 5;
+              done
+              echo "TapData Server reachable"
+      containers:
+        - name: tapdata-apiserver
+          image: "${IMAGE}"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 3080
+              protocol: TCP
+          env:
+            - name: MODULE
+              value: "api"
+            - name: MONGODB_CONNECTION_STRING
+              value: "${MONGO_URI}"
+            - name: BACKENDURL
+              value: "${BACKEND_URL}"
+            - name: JAVA_VERSION
+              value: "${JAVA_VERSION}"
+            - name: TZ
+              value: "${TZ}"
+            - name: LICENSE_HOST
+              value: "${LICENSE_HOST}"
+            - name: TAPDATA_WORK_DIR
+              value: "/tapdata/apps"
+          command:
+            - /tapdata/docker-entrypoint.sh
+          resources:
+            limits:
+              cpu: "2"
+              memory: 4Gi
+            requests:
+              cpu: 500m
+              memory: 2Gi
+          volumeMounts:
+            - name: config
+              mountPath: /tmp/conf
+            - name: logs
+              mountPath: /tapdata/apps/logs
+      volumes:
+        - name: config
+          configMap:
+            name: tapdata-apiserver-config
+        - name: logs
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tapdata-apiserver
+  labels:
+    app: tapdata-apiserver
+    app.kubernetes.io/part-of: tapdata
+spec:
+  type: NodePort
+  ports:
+    - name: http
+      port: 3080
+      targetPort: 3080
+      nodePort: ${NODEPORT_API}
+      protocol: TCP
+  selector:
+    app: tapdata-apiserver

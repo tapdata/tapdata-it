@@ -1,0 +1,20 @@
+{
+  "_meta": "L3-F-01 用例的两用连接配置：同一节点既作为 TM 建连接的 config（DataSourcePayload.fromNode），\n又作为旁路验证器的直连参数（DirectVerifierFactory.create）。\n默认使用 k3s 集群内 Service DNS，使引擎侧可直达；本地笔记本经 kubectl port-forward 访问时，\n可通过 -Dl3.verifier.source.jdbcUrl / -Dl3.verifier.target.uri 仅改写旁路验证器地址，不污染 TM 连接配置。\n任何叶子键都可用 -Dconnector.it.<path> 或 CONNECTOR_IT_<PATH> 覆盖（如 CONNECTOR_IT_SOURCE_HOST）。",
+  "source": {
+    "database_type": "mysql",
+    "host": "mysql.tapdata-db.svc.cluster.local",
+    "port": 3306,
+    "database": "autoTest",
+    "username": "root",
+    "password": "tapdata",
+    "timezone": "",
+    "jdbcUrl": "jdbc:mysql://mysql.tapdata-db.svc.cluster.local:3306/autoTest?useSSL=false&allowPublicKeyRetrieval=true&serverTimezone=UTC&characterEncoding=UTF-8"
+  },
+  "target": {
+    "database_type": "mongodb",
+    "isUri": true,
+    "ssl": false,
+    "uri": "mongodb://root:Gotapd8%21@mongo7.taptest-dbs.svc.cluster.local:27017/tapdata_l3?authSource=admin",
+    "database": "tapdata_l3"
+  }
+}

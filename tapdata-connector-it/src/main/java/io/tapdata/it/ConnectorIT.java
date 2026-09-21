@@ -192,6 +192,12 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * <p>
  * 生命周期与引擎一致：{@code init → 能力调用 → releaseExternal → stop}。
  * 测试表名随机生成、测试数据随机生成（{@link RandomDataFactory}），用例间相互隔离。
+ * <p>
+ * 依赖数据库默认经 DBForge 按需供应：子类在 {@link #createContext()} 中调用
+ * {@link #readConnectionConfig(io.tapdata.dbforge.sdk.model.DbType, String)}，
+ * 设 {@code DBF_IT_ENDPOINT} 即直连租约 {@code external_host:nodePort}（公网外加
+ * {@code DBF_IT_HOST_MAPPING=true}）；不设则回退静态 {@code *-connection.json}，详见
+ * {@link io.tapdata.it.config.DbForgeProvisioner}。
  */
 public abstract class ConnectorIT {
 
@@ -1045,6 +1051,37 @@ public abstract class ConnectorIT {
      */
     protected static DataMap readConnectionConfig(String path) throws IOException {
         return io.tapdata.it.config.ConnectionConfigLoader.load(path);
+    }
+
+    /**
+     * 读取连接配置（dbforge 优先）：默认经 {@link io.tapdata.it.config.DbForgeProvisioner} 向 DBForge
+     * 控制面按需申请 {@code dbType} 类型的真实数据库，直接直连租约返回的
+     * {@code external_host:nodePort}（回注配置与静态 JSON 同构，Mongo 重建内嵌凭证 uri、
+     * AS400 补 journal 字段）；未启用（不设 {@code DBF_IT_ENDPOINT}，场景 4：用本地库）时
+     * 回退 {@link #readConnectionConfig(String) 静态 JSON} 链路，默认构建不受影响。
+     * <p>
+     * 四类运行场景的连接地址适配（详见 {@link io.tapdata.it.config.DbForgeProvisioner}）：
+     * <table border="1">
+     *   <tr><th>场景</th><th>连接地址来源</th><th>是否转换</th></tr>
+     *   <tr><td>#1 CI 自建 Runner（内网）/ #2 开发者在公司内网</td>
+     *       <td>直连租约返回的内网 external_host:nodePort</td><td>否（默认）</td></tr>
+     *   <tr><td>#3 开发者在公网外</td>
+     *       <td>租约内网 host 经映射表转成公网 host，端口不变</td>
+     *       <td>是，{@code DBF_IT_HOST_MAPPING} 启用</td></tr>
+     *   <tr><td>#4 开发者用本地库</td><td>不设 {@code DBF_IT_ENDPOINT} → 回退 connection.json</td>
+     *       <td>不涉及 dbforge</td></tr>
+     * </table>
+     *
+     * @param dbType       本测试依赖的数据库类型（如 {@code DbType.MYSQL}）
+     * @param fallbackPath 未启用 dbforge 时的静态 JSON 回退路径（classpath 优先，其次文件系统）
+     * @return 连接配置（dbforge 租约回注或静态 JSON + 外部接口 + 逐项覆盖）
+     */
+    protected static DataMap readConnectionConfig(io.tapdata.dbforge.sdk.model.DbType dbType,
+                                                  String fallbackPath) throws IOException {
+        if (io.tapdata.it.config.DbForgeProvisioner.enabled()) {
+            return io.tapdata.it.config.DbForgeProvisioner.provision(dbType);
+        }
+        return readConnectionConfig(fallbackPath);
     }
 
     /**

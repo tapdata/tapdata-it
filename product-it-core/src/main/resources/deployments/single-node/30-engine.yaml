@@ -1,0 +1,98 @@
+# TapData Engine（后端执行节点，MODULE=backend，副本数 ${ENGINE_REPLICAS}）。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tapdata-engine-config
+  labels:
+    app: tapdata-engine
+    app.kubernetes.io/part-of: tapdata
+data:
+  application.yml: |
+    spring:
+      data:
+        mongodb:
+          uri: ""
+          ssl: 'false'
+          username: "${MONGO_USER}"
+          password: "${MONGO_PASSWORD}"
+          mongoConnectionString: '${MONGO_URI}'
+          authenticationDatabase: admin
+    tapdata:
+      mode: cluster
+      conf:
+        tapdataPort: '3030'
+        backendUrl: '${BACKEND_URL}'
+        apiServerPort: '3080'
+        SCRIPT_DIR: etc
+        reportInterval: 5000
+        Decimal128ToNumber: 'false'
+        responseOfTotalType: NUMBER
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tapdata-engine
+  labels:
+    app: tapdata-engine
+    app.kubernetes.io/part-of: tapdata
+spec:
+  replicas: ${ENGINE_REPLICAS}
+  selector:
+    matchLabels:
+      app: tapdata-engine
+  template:
+    metadata:
+      labels:
+        app: tapdata-engine
+    spec:
+      ${IMAGE_PULL_SECRETS_BLOCK}
+      initContainers:
+        - name: wait-for-tapdata-server
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z -w 3 tapdata-server 3030; do
+                echo "waiting for TapData Server..."; sleep 5;
+              done
+              echo "TapData Server reachable"
+      containers:
+        - name: tapdata-engine
+          image: "${IMAGE}"
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MODULE
+              value: "backend"
+            - name: MONGODB_CONNECTION_STRING
+              value: "${MONGO_URI}"
+            - name: BACKENDURL
+              value: "${BACKEND_URL}"
+            - name: JAVA_VERSION
+              value: "${JAVA_VERSION}"
+            - name: TZ
+              value: "${TZ}"
+            - name: LICENSE_HOST
+              value: "${LICENSE_HOST}"
+            - name: TAPDATA_WORK_DIR
+              value: "/tapdata/apps"
+          command:
+            - /tapdata/docker-entrypoint.sh
+          resources:
+            limits:
+              cpu: "2"
+              memory: 4Gi
+            requests:
+              cpu: 500m
+              memory: 2Gi
+          volumeMounts:
+            - name: config
+              mountPath: /tmp/conf
+            - name: logs
+              mountPath: /tapdata/apps/logs
+      volumes:
+        - name: config
+          configMap:
+            name: tapdata-engine-config
+        - name: logs
+          emptyDir: {}

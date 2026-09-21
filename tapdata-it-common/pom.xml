@@ -46,6 +46,16 @@
             <version>${jackson.version}</version>
             <scope>compile</scope>
         </dependency>
+        <!-- DBForge 控制面 Java SDK：DbForgeProvisioner 按需动态供应 IT 依赖的数据库（租约申请/续租/释放）。
+             compile scope：供使用方（tapdata-connector-it 及其下游各连接器 IT）无论以 compile/test 方式
+             依赖本模块时都能传递到其 classpath；需先安装/部署 dbforge-sdk 到本地仓库或 Nexus
+             （cd dbforge/sdk/java && mvn -o install）。仅当 DBF_IT_ENDPOINT 设置时才真正调用 -->
+        <dependency>
+            <groupId>io.tapdata.dbforge</groupId>
+            <artifactId>dbforge-sdk</artifactId>
+            <version>${dbforge.sdk.version}</version>
+            <scope>compile</scope>
+        </dependency>
     </dependencies>
 
     <build>

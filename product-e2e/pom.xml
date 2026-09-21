@@ -1,0 +1,168 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>io.tapdata</groupId>
+        <artifactId>tapdata-it</artifactId>
+        <version>1.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>product-e2e</artifactId>
+    <name>TapData L3 Product E2E Tests</name>
+    <url>https://tapdata.io</url>
+    <description>L3-F 完整产品端到端用例（冒烟 s / 功能 f），发布前 RC 门禁。用例置于 src/it/java，
+        由 maven-failsafe 执行；依赖 product-it-core 框架完成 k3s 动态部署与 TM API 驱动。</description>
+
+    <properties>
+        <!-- L3 运行参数默认值：命令行 -D 覆盖；空值表示走 L3EnvConfig 内置默认、JSON 基线或环境变量。
+             键名必须与 L3EnvConfig 的点分键一致（l3.<key> ↔ 环境变量 L3_<KEY>）。
+             未列在此处的键（如 l3.registry.username / l3.mongo.image）可用环境变量注入，
+             或在 CI step 级 env 直接声明，无须修改本 pom。 -->
+        <l3.env.config></l3.env.config>
+        <l3.kubeconfig.path></l3.kubeconfig.path>
+        <l3.kubeconfig.context></l3.kubeconfig.context>
+        <l3.apiserver.url></l3.apiserver.url>
+        <l3.node.address></l3.node.address>
+        <l3.node.port.tm></l3.node.port.tm>
+        <l3.node.port.apiserver></l3.node.port.apiserver>
+        <l3.image.registry></l3.image.registry>
+        <l3.image.repository></l3.image.repository>
+        <l3.image.tag></l3.image.tag>
+        <l3.deployment.mode></l3.deployment.mode>
+        <l3.namespace.prefix></l3.namespace.prefix>
+        <l3.run.id></l3.run.id>
+        <l3.reuse.existing></l3.reuse.existing>
+        <l3.teardown.on.exit></l3.teardown.on.exit>
+        <l3.ready.timeout.sec></l3.ready.timeout.sec>
+        <l3.task.timeout.sec></l3.task.timeout.sec>
+        <l3.tm.base.url></l3.tm.base.url>
+        <l3.tm.token></l3.tm.token>
+        <l3.login.email></l3.login.email>
+        <l3.login.password></l3.login.password>
+    </properties>
+
+    <dependencies>
+        <!-- L3 框架本体（环境编排 + TM API + ProductIT 基类） -->
+        <dependency>
+            <groupId>io.tapdata</groupId>
+            <artifactId>product-it-core</artifactId>
+            <version>${project.version}</version>
+            <scope>compile</scope>
+        </dependency>
+
+        <!-- 运行期：MongoDB 驱动（直连目标库旁路验证，与 connector 版本对齐） -->
+        <dependency>
+            <groupId>org.mongodb</groupId>
+            <artifactId>mongodb-driver-sync</artifactId>
+            <version>4.11.1</version>
+            <scope>test</scope>
+        </dependency>
+
+        <!-- JUnit5 引擎：failsafe 执行 *IT -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-engine</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <!-- 跳过单元测试，仅由 failsafe 跑 src/it 集成测试（规避引擎/依赖的 JDK 兼容问题） -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.0.0-M9</version>
+                <configuration>
+                    <skipTests>true</skipTests>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <release>17</release>
+                </configuration>
+            </plugin>
+
+            <!-- 将 src/it/java、src/it/resources 纳入测试编译/资源 -->
+            <plugin>
+                <groupId>org.codehaus.mojo</groupId>
+                <artifactId>build-helper-maven-plugin</artifactId>
+                <version>3.4.0</version>
+                <executions>
+                    <execution>
+                        <id>add-it-source</id>
+                        <phase>generate-test-sources</phase>
+                        <goals>
+                            <goal>add-test-source</goal>
+                        </goals>
+                        <configuration>
+                            <sources>
+                                <source>src/it/java</source>
+                            </sources>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>add-it-resource</id>
+                        <phase>generate-test-resources</phase>
+                        <goals>
+                            <goal>add-test-resource</goal>
+                        </goals>
+                        <configuration>
+                            <resources>
+                                <resource>
+                                    <directory>src/it/resources</directory>
+                                </resource>
+                            </resources>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <!-- failsafe 执行 *IT.java；转发 L3 运行参数到被测 JVM（框架经系统属性/环境变量/JSON 读取） -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>3.0.0-M9</version>
+                <configuration>
+                    <includes>
+                        <include>**/*IT.java</include>
+                    </includes>
+                    <systemPropertyVariables>
+                        <l3.env.config>${l3.env.config}</l3.env.config>
+                        <l3.kubeconfig.path>${l3.kubeconfig.path}</l3.kubeconfig.path>
+                        <l3.kubeconfig.context>${l3.kubeconfig.context}</l3.kubeconfig.context>
+                        <l3.apiserver.url>${l3.apiserver.url}</l3.apiserver.url>
+                        <l3.node.address>${l3.node.address}</l3.node.address>
+                        <l3.node.port.tm>${l3.node.port.tm}</l3.node.port.tm>
+                        <l3.node.port.apiserver>${l3.node.port.apiserver}</l3.node.port.apiserver>
+                        <l3.image.registry>${l3.image.registry}</l3.image.registry>
+                        <l3.image.repository>${l3.image.repository}</l3.image.repository>
+                        <l3.image.tag>${l3.image.tag}</l3.image.tag>
+                        <l3.deployment.mode>${l3.deployment.mode}</l3.deployment.mode>
+                        <l3.namespace.prefix>${l3.namespace.prefix}</l3.namespace.prefix>
+                        <l3.run.id>${l3.run.id}</l3.run.id>
+                        <l3.reuse.existing>${l3.reuse.existing}</l3.reuse.existing>
+                        <l3.teardown.on.exit>${l3.teardown.on.exit}</l3.teardown.on.exit>
+                        <l3.ready.timeout.sec>${l3.ready.timeout.sec}</l3.ready.timeout.sec>
+                        <l3.task.timeout.sec>${l3.task.timeout.sec}</l3.task.timeout.sec>
+                        <l3.tm.base.url>${l3.tm.base.url}</l3.tm.base.url>
+                        <l3.tm.token>${l3.tm.token}</l3.tm.token>
+                        <l3.login.email>${l3.login.email}</l3.login.email>
+                        <l3.login.password>${l3.login.password}</l3.login.password>
+                    </systemPropertyVariables>
+                </configuration>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

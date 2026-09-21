@@ -1,0 +1,88 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>io.tapdata</groupId>
+        <artifactId>tapdata-it</artifactId>
+        <version>1.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>product-it-core</artifactId>
+    <name>TapData L3 Product IT Core</name>
+    <url>https://tapdata.io</url>
+    <description>L3 完整产品集成测试框架本体：基于 fabric8 在 k3s 动态部署完整 TapData（多部署模式、
+        命名空间与 NodePort 动态分配隔离多版本并行），基于 tm-sdk 的 TmAvailableRestTemplate 封装
+        与 TM 每个 Controller 对应的类型化 API，复用 tapdata-it-common 的 generator/schema/verifier。
+        供 product-e2e / product-stability 及其他开发者编写 L3 用例依赖。</description>
+
+    <dependencies>
+        <!-- 复用共享资产：generator（随机造数）/schema（表字段规格）/verifier（旁路验证器）/config（统一加载） -->
+        <dependency>
+            <groupId>io.tapdata</groupId>
+            <artifactId>tapdata-it-common</artifactId>
+            <version>${project.version}</version>
+            <scope>compile</scope>
+        </dependency>
+
+        <!-- 管理端传输对象：TaskDto / DAG / DatabaseNode / Status（复用，开发者按用例构造请求体） -->
+        <dependency>
+            <groupId>com.tapdata</groupId>
+            <artifactId>tm-common</artifactId>
+            <version>${tm.common.version}</version>
+            <scope>compile</scope>
+        </dependency>
+
+        <!-- 管理端 SDK：TmAvailableRestTemplate（HTTP + TM 探活）、认证、VersionHeaderInterceptor、JacksonUtil -->
+        <dependency>
+            <groupId>com.tapdata</groupId>
+            <artifactId>tm-sdk</artifactId>
+            <version>${tm.sdk.version}</version>
+            <scope>compile</scope>
+        </dependency>
+
+        <!-- Kubernetes（k3s）客户端：动态部署完整产品、查询/分配 NodePort、加载 kubeconfig 证书 -->
+        <dependency>
+            <groupId>io.fabric8</groupId>
+            <artifactId>kubernetes-client</artifactId>
+            <version>${fabric8.version}</version>
+            <scope>compile</scope>
+        </dependency>
+
+        <!-- JSON：API 请求/响应序列化；jsr310 处理 LocalDateTime -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>${jackson.version}</version>
+            <scope>compile</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+            <version>${jackson.version}</version>
+            <scope>compile</scope>
+        </dependency>
+
+        <!-- HTTP 传输层：TmApiContext 采用 JDK HttpClient（spring-web 的 JdkClientHttpRequestFactory），
+             以支持 TM 的 PATCH 端点（confirm/confirmStart/update），无需额外 HTTP 客户端依赖。
+             tm-common 传递的 spring-web 7.x 仅对接 Apache HttpClient 5，故不引 hc4。 -->
+
+        <!-- JUnit5：ProductIT 基类（@BeforeAll/@AfterAll/@Test 生命周期），供用例继承 -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
+            <version>${junit.version}</version>
+            <scope>compile</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <release>17</release>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>

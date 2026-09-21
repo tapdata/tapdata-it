@@ -1,0 +1,17 @@
+# 分布式 HA：为 engine 副本提供 headless service（稳定 DNS，供节点互访/水平扩展观测）。
+apiVersion: v1
+kind: Service
+metadata:
+  name: tapdata-engine-headless
+  labels:
+    app: tapdata-engine
+    app.kubernetes.io/part-of: tapdata
+spec:
+  clusterIP: None
+  selector:
+    app: tapdata-engine
+  ports:
+    - name: agent
+      port: 3030
+      targetPort: 3030
+      protocol: TCP
