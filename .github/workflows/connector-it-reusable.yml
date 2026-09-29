@@ -255,8 +255,8 @@ jobs:
           echo "label=${SAFE}" >> "$GITHUB_OUTPUT"
 
       # 检查 JDK 可用性：runner 镜像已预装 JDK 17（/usr/java/jdk-17.0.12），
-      # 不使用 actions/setup-java 下载安装；Maven 本地仓库由 runner 容器挂载持久化（./m2-N:/root/.m2），
-      # 替代 setup-java 的 cache 功能
+      # 不使用 actions/setup-java 下载安装；Maven 本地仓库由 runner 容器挂载共享 PVC
+      # 持久化。所有 Maven 写入必须使用与 build/scan runner 相同的 flock。
       - name: Check JDK 17 and set JAVA_HOME
         shell: bash
         run: |
@@ -290,9 +290,13 @@ jobs:
           if [[ -f connectors-common/pom.xml ]]; then
             COMMON_MODULES="$(awk '/^[[:space:]]*<module>/{gsub(/.*<module>|<\/module>.*/, ""); print "connectors-common/"$0}' connectors-common/pom.xml | paste -sd, -)"
             if [[ -n "${COMMON_MODULES}" ]]; then
-              mvn -U -B install -pl "connectors-common,${COMMON_MODULES}" -am \
-                -DskipITs=true -DskipTests -Dmaven.javadoc.skip=true -q \
-                -Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true
+              lock_file="${MAVEN_CACHE_LOCK_FILE:-/root/.m2/.tapdata-maven-build.lock}"
+              (
+                flock -x 9
+                mvn -U -B install -pl "connectors-common,${COMMON_MODULES}" -am \
+                  -DskipITs=true -DskipTests -Dmaven.javadoc.skip=true -q \
+                  -Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true
+              ) 9>"$lock_file"
             fi
           fi
       
@@ -301,9 +305,13 @@ jobs:
       - name: Install dependency chain (skip all tests)
         shell: bash
         run: |
-          mvn -U -B install -pl "${{ matrix.connector }}" -am \
-            -DskipITs=true -DskipTests -Dmaven.javadoc.skip=true -q \
-            -Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true
+          lock_file="${MAVEN_CACHE_LOCK_FILE:-/root/.m2/.tapdata-maven-build.lock}"
+          (
+            flock -x 9
+            mvn -U -B install -pl "${{ matrix.connector }}" -am \
+              -DskipITs=true -DskipTests -Dmaven.javadoc.skip=true -q \
+              -Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true
+          ) 9>"$lock_file"
       
       # 第二步：仅目标模块执行 failsafe 集成测试。
       # test-compile 触发 build-helper 将 src/it/java 加入测试源码并编译；
@@ -313,9 +321,13 @@ jobs:
       - name: Run integration tests
         shell: bash
         run: |
-          cd "${{ matrix.connector }}"
-          mvn -U -B test-compile failsafe:integration-test failsafe:verify -DskipITs=false \
-            -Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true
+          lock_file="${MAVEN_CACHE_LOCK_FILE:-/root/.m2/.tapdata-maven-build.lock}"
+          (
+            flock -x 9
+            cd "${{ matrix.connector }}"
+            mvn -U -B test-compile failsafe:integration-test failsafe:verify -DskipITs=false \
+              -Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true
+          ) 9>"$lock_file"
 
       # 报告打包上传（失败也上传），artifact 名称关联仓库 owner、模块与 commit SHA
       - name: Upload failsafe reports
