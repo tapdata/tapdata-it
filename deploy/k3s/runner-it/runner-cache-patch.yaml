@@ -1,0 +1,127 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runner-cache-mounts
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: seed-maven-cache
+          image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              target="/maven-cache/_runner-cache/${POD_NAME}"
+              mkdir -p "$target"
+              if [[ ! -f "$target/.seeded" ]]; then
+                shopt -s dotglob nullglob
+                for item in /maven-cache/*; do
+                  [[ "$(basename "$item")" == _runner-cache ]] && continue
+                  cp -a --reflink=always "$item" "$target/"
+                done
+                touch "$target/.seeded"
+              fi
+              python3 - "$target/settings.xml" <<'PY'
+              import pathlib
+              import sys
+              import xml.etree.ElementTree as ET
+
+              settings_path = pathlib.Path(sys.argv[1])
+              root = ET.parse(settings_path).getroot() if settings_path.exists() else ET.Element("settings")
+              namespace = root.tag.partition("}")[0] + "}" if "}" in root.tag else ""
+              tag = lambda name: f"{namespace}{name}"
+              mirrors = root.find(tag("mirrors"))
+              if mirrors is None:
+                  mirrors = ET.Element(tag("mirrors"))
+                  profiles = root.find(tag("profiles"))
+                  root.insert(list(root).index(profiles) if profiles is not None else len(root), mirrors)
+              mirror = next((item for item in mirrors.findall(tag("mirror"))
+                             if item.findtext(tag("id")) == "tapdata-nexus"), None)
+              if mirror is None:
+                  mirror = ET.SubElement(mirrors, tag("mirror"))
+              for name, value in (("id", "tapdata-nexus"),
+                                  ("name", "Tapdata Nexus Maven group"),
+                                  ("mirrorOf", "*"),
+                                  ("url", "https://nexus.tapdata.net/repository/maven-public/")):
+                  element = mirror.find(tag(name))
+                  if element is None:
+                      element = ET.SubElement(mirror, tag(name))
+                  element.text = value
+              settings_path.parent.mkdir(parents=True, exist_ok=True)
+              ET.ElementTree(root).write(settings_path, encoding="UTF-8", xml_declaration=True)
+              check = ET.parse(settings_path).getroot()
+              configured = any(
+                  item.findtext(tag("id")) == "tapdata-nexus"
+                  and item.findtext(tag("url")) == "https://nexus.tapdata.net/repository/maven-public/"
+                  and item.findtext(tag("mirrorOf")) == "*"
+                  for group in check.findall(tag("mirrors"))
+                  for item in group.findall(tag("mirror"))
+              )
+              if not configured:
+                  raise SystemExit("Nexus Maven mirror verification failed")
+              print("Configured Maven mirror: https://nexus.tapdata.net/repository/maven-public/")
+              PY
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: maven-cache
+              mountPath: /maven-cache
+      volumes:
+        - name: build-source
+          persistentVolumeClaim:
+            claimName: runner-build-source
+        - name: maven-cache
+          persistentVolumeClaim:
+            claimName: runner-maven-cache
+        - name: runner-node-cache
+          persistentVolumeClaim:
+            claimName: runner-node-cache
+        - name: runner-pkg-cache
+          persistentVolumeClaim:
+            claimName: runner-pkg-cache
+        - name: java-truststore
+          secret:
+            secretName: runner-it-truststore-v2
+        - name: git-askpass
+          configMap:
+            name: runner-git-askpass
+            defaultMode: 365
+      containers:
+        - name: runner
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: runner-github-token
+                  key: GITHUB_TOKEN
+            - name: GIT_ASKPASS
+              value: /usr/local/bin/runner-git-askpass
+            - name: GIT_TERMINAL_PROMPT
+              value: "0"
+          volumeMounts:
+            - name: build-source
+              mountPath: /root/build_source
+            - name: maven-cache
+              mountPath: /root/.m2
+              subPathExpr: _runner-cache/$(POD_NAME)
+            - name: runner-node-cache
+              mountPath: /root/.npm
+            - name: runner-pkg-cache
+              mountPath: /root/.pkg-cache
+            - name: git-askpass
+              mountPath: /usr/local/bin/runner-git-askpass
+              subPath: runner-git-askpass
+              readOnly: true
+            - name: java-truststore
+              mountPath: /usr/java/jdk-17.0.12/lib/security/cacerts
+              subPath: cacerts
+              readOnly: true
