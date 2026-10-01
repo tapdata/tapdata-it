@@ -283,26 +283,51 @@ jobs:
       # 保证 connector 依赖链（-am）之外的公共模块也能从本地仓库解析，避免矩阵任务重复全量安装；
       # 模块列表从 <modules> 声明提取而非扫描目录，避免未声明的游离目录（如 build/dist）破坏 -pl；
       # SSL 参数显式写在命令上（不依赖 MAVEN_OPTS），覆盖自签名证书的内网 Nexus
-      - name: Install connectors-common modules (skip all tests)
+      - name: Resolve connectors-common modules
+        id: common-modules
         shell: bash
         run: |
           if [[ -f connectors-common/pom.xml ]]; then
-            COMMON_MODULES="$(awk '/^[[:space:]]*<module>/{gsub(/.*<module>|<\/module>.*/, ""); print "connectors-common/"$0}' connectors-common/pom.xml | paste -sd, -)"
-            if [[ -n "${COMMON_MODULES}" ]]; then
-              bash .github/scripts/retry-maven.sh mvn -U -B install -pl "connectors-common,${COMMON_MODULES}" -am \
-                -DskipITs=true -DskipTests -Dmaven.javadoc.skip=true -q \
-                -Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true
-            fi
+            modules="$(awk '/^[[:space:]]*<module>/{gsub(/.*<module>|<\/module>.*/, ""); print "connectors-common/"$0}' connectors-common/pom.xml | paste -sd, -)"
+            echo "modules=${modules}" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Install connectors-common modules (skip all tests)
+        if: steps.common-modules.outputs.modules != ''
+        uses: tapdata/tapdata-it/.github/actions/maven-retry@main
+        with:
+          args: |
+            -U
+            -B
+            install
+            -pl
+            connectors-common,${{ steps.common-modules.outputs.modules }}
+            -am
+            -DskipITs=true
+            -DskipTests
+            -Dmaven.javadoc.skip=true
+            -q
+            -Dmaven.wagon.http.ssl.insecure=true
+            -Dmaven.wagon.http.ssl.allowall=true
       
       # 第一步：安装依赖链（-am 会带入 connectors-common 等依赖模块）但不执行任何测试，
       # 防止公共模块自身的 IT 被连带执行；SSL 参数同上（内网 Nexus 自签名证书）
       - name: Install dependency chain (skip all tests)
-        shell: bash
-        run: |
-          bash .github/scripts/retry-maven.sh mvn -U -B install -pl "${{ matrix.connector }}" -am \
-            -DskipITs=true -DskipTests -Dmaven.javadoc.skip=true -q \
-            -Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true
+        uses: tapdata/tapdata-it/.github/actions/maven-retry@main
+        with:
+          args: |
+            -U
+            -B
+            install
+            -pl
+            ${{ matrix.connector }}
+            -am
+            -DskipITs=true
+            -DskipTests
+            -Dmaven.javadoc.skip=true
+            -q
+            -Dmaven.wagon.http.ssl.insecure=true
+            -Dmaven.wagon.http.ssl.allowall=true
       
       # 第二步：仅目标模块执行 failsafe 集成测试。
       # test-compile 触发 build-helper 将 src/it/java 加入测试源码并编译；
@@ -310,11 +335,18 @@ jobs:
       # （规避 JDK 17+/Byte Buddy 兼容问题，与本地实践一致）；
       # -DskipITs=false 覆盖各 connector pom 中默认的 skipITs=true；SSL 参数同上
       - name: Run integration tests
-        shell: bash
-        run: |
-          cd "${{ matrix.connector }}"
-          bash "$GITHUB_WORKSPACE/.github/scripts/retry-maven.sh" mvn -U -B test-compile failsafe:integration-test failsafe:verify -DskipITs=false \
-            -Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true
+        uses: tapdata/tapdata-it/.github/actions/maven-retry@main
+        with:
+          working-directory: ${{ matrix.connector }}
+          args: |
+            -U
+            -B
+            test-compile
+            failsafe:integration-test
+            failsafe:verify
+            -DskipITs=false
+            -Dmaven.wagon.http.ssl.insecure=true
+            -Dmaven.wagon.http.ssl.allowall=true
 
       # 报告打包上传（失败也上传），artifact 名称关联仓库 owner、模块与 commit SHA
       - name: Upload failsafe reports

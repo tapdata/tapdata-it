@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Retry Maven commands for transient Nexus/proxy failures without hiding the
-# final Maven exit code. `-U` is still supplied by callers to refresh missing
-# or stale artifact metadata on each attempt.
+# final Maven exit code. Callers pass -U so Maven refreshes missing or stale
+# artifact metadata on each attempt.
 set -euo pipefail
 
 if (($# == 0)); then
