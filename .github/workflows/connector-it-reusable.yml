@@ -289,7 +289,7 @@ jobs:
           if [[ -f connectors-common/pom.xml ]]; then
             COMMON_MODULES="$(awk '/^[[:space:]]*<module>/{gsub(/.*<module>|<\/module>.*/, ""); print "connectors-common/"$0}' connectors-common/pom.xml | paste -sd, -)"
             if [[ -n "${COMMON_MODULES}" ]]; then
-              mvn -U -B install -pl "connectors-common,${COMMON_MODULES}" -am \
+              bash .github/scripts/retry-maven.sh mvn -U -B install -pl "connectors-common,${COMMON_MODULES}" -am \
                 -DskipITs=true -DskipTests -Dmaven.javadoc.skip=true -q \
                 -Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true
             fi
@@ -300,7 +300,7 @@ jobs:
       - name: Install dependency chain (skip all tests)
         shell: bash
         run: |
-          mvn -U -B install -pl "${{ matrix.connector }}" -am \
+          bash .github/scripts/retry-maven.sh mvn -U -B install -pl "${{ matrix.connector }}" -am \
             -DskipITs=true -DskipTests -Dmaven.javadoc.skip=true -q \
             -Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true
       
@@ -313,7 +313,7 @@ jobs:
         shell: bash
         run: |
           cd "${{ matrix.connector }}"
-          mvn -U -B test-compile failsafe:integration-test failsafe:verify -DskipITs=false \
+          bash "$GITHUB_WORKSPACE/.github/scripts/retry-maven.sh" mvn -U -B test-compile failsafe:integration-test failsafe:verify -DskipITs=false \
             -Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true
 
       # 报告打包上传（失败也上传），artifact 名称关联仓库 owner、模块与 commit SHA
