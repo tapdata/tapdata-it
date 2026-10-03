@@ -372,39 +372,8 @@ jobs:
           # 自托管 runner 环境：内网 Nexus 使用自签名证书，跳过 SSL 验证
           echo "MAVEN_OPTS=-Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true" >> "$GITHUB_ENV"
 
-      # 第零步：预装 connectors-common 聚合 POM 声明的全部公共模块到本地仓库（-am 自动带上父 POM 与模块间依赖），
-      # 保证 connector 依赖链（-am）之外的公共模块也能从本地仓库解析，避免矩阵任务重复全量安装；
-      # 模块列表从 <modules> 声明提取而非扫描目录，避免未声明的游离目录（如 build/dist）破坏 -pl；
-      # SSL 参数显式写在命令上（不依赖 MAVEN_OPTS），覆盖自签名证书的内网 Nexus
-      - name: Resolve connectors-common modules
-        id: common-modules
-        shell: bash
-        run: |
-          if [[ -f connectors-common/pom.xml ]]; then
-            modules="$(awk '/^[[:space:]]*<module>/{gsub(/.*<module>|<\/module>.*/, ""); print "connectors-common/"$0}' connectors-common/pom.xml | paste -sd, -)"
-            echo "modules=${modules}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Install connectors-common modules (skip all tests)
-        if: steps.common-modules.outputs.modules != ''
-        uses: tapdata/tapdata-it/.github/actions/maven-retry@main
-        with:
-          args: |
-            -U
-            -B
-            install
-            -pl
-            connectors-common,${{ steps.common-modules.outputs.modules }}
-            -am
-            -DskipITs=true
-            -DskipTests
-            -Dmaven.javadoc.skip=true
-            -q
-            -Dmaven.wagon.http.ssl.insecure=true
-            -Dmaven.wagon.http.ssl.allowall=true
-      
-      # 第一步：安装依赖链（-am 会带入 connectors-common 等依赖模块）但不执行任何测试，
-      # 防止公共模块自身的 IT 被连带执行；SSL 参数同上（内网 Nexus 自签名证书）
+      # Only build the target connector and its Maven reactor dependencies.
+      # Skip tests here; the following step runs IT for the target module only.
       - name: Install dependency chain (skip all tests)
         uses: tapdata/tapdata-it/.github/actions/maven-retry@main
         with:
