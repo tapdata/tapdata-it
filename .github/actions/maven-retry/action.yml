@@ -17,7 +17,17 @@ runs:
       env:
         MAVEN_ARGUMENTS: ${{ inputs.args }}
       run: |
-        mapfile -t maven_args <<< "$MAVEN_ARGUMENTS"
+        # YAML block scalars and here-strings both add trailing newlines.
+        # Ignore blank lines without splitting or evaluating individual arguments.
+        maven_args=()
+        while IFS= read -r argument; do
+          [[ "$argument" =~ ^[[:space:]]*$ ]] && continue
+          maven_args+=("$argument")
+        done <<< "$MAVEN_ARGUMENTS"
+        if (( ${#maven_args[@]} == 0 )); then
+          echo "::error::Maven arguments must not be empty"
+          exit 2
+        fi
         if [[ -n "${MAVEN_JOB_SETTINGS:-}" ]]; then
           [[ -f "$MAVEN_JOB_SETTINGS" ]] || { echo "::error::Job Maven settings missing"; exit 1; }
           maven_args=(--settings "$MAVEN_JOB_SETTINGS" "${maven_args[@]}")
