@@ -18,4 +18,8 @@ runs:
         MAVEN_ARGUMENTS: ${{ inputs.args }}
       run: |
         mapfile -t maven_args <<< "$MAVEN_ARGUMENTS"
+        if [[ -n "${MAVEN_JOB_SETTINGS:-}" ]]; then
+          [[ -f "$MAVEN_JOB_SETTINGS" ]] || { echo "::error::Job Maven settings missing"; exit 1; }
+          maven_args=(--settings "$MAVEN_JOB_SETTINGS" "${maven_args[@]}")
+        fi
         bash "$GITHUB_ACTION_PATH/retry-maven.sh" mvn "${maven_args[@]}"
