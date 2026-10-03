@@ -1,0 +1,25 @@
+name: Maven with retry
+description: Run a Maven command with bounded retries for transient repository failures
+inputs:
+  args:
+    description: Maven arguments, one argument per line
+    required: true
+  working-directory:
+    description: Directory from which Maven runs
+    required: false
+    default: .
+runs:
+  using: composite
+  steps:
+    - name: Run Maven with retry
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        MAVEN_ARGUMENTS: ${{ inputs.args }}
+      run: |
+        mapfile -t maven_args <<< "$MAVEN_ARGUMENTS"
+        if [[ -n "${MAVEN_JOB_SETTINGS:-}" ]]; then
+          [[ -f "$MAVEN_JOB_SETTINGS" ]] || { echo "::error::Job Maven settings missing"; exit 1; }
+          maven_args=(--settings "$MAVEN_JOB_SETTINGS" "${maven_args[@]}")
+        fi
+        bash "$GITHUB_ACTION_PATH/retry-maven.sh" mvn "${maven_args[@]}"

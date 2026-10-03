@@ -1,8 +1,8 @@
 # 可复用 Connector 集成测试 workflow（维护于 tapdata-it 仓库）
 #
 # 由 tapdata-connectors（开源）与 tapdata-connectors-enterprise（闭源）通过 workflow_call 触发：
-# 1. 自动分析本次提交/PR 变更的文件，映射到 Maven 模块，仅挑选"被修改且含集成测试（src/it/java）"
-#    的 connector 模块（变更左移，避免全量执行）。
+# 1. 自动分析本次提交/PR 变更，沿 Maven 反向传递依赖挑选受影响且含 src/it/java 的模块。
+#    同时合并基线与当前 POM 图，覆盖删除模块、父 POM、聚合模块和 profile 依赖。
 # 2. 对每个选中的模块执行 maven-failsafe 集成测试（跳过 surefire 单测，规避 Byte Buddy/JDK 兼容问题）。
 # 3. 将 target/failsafe-reports 打包上传为 artifacts，命名包含仓库 owner、模块与 commit SHA，
 #    与当前提交/PR 关联。
@@ -24,10 +24,10 @@ on:
   workflow_call:
     inputs:
       common_changed_strategy:
-        description: 'connectors-common 变更时的执行策略：all（运行全部有 IT 的 connector，保守）或 affected（仅运行依赖变更 common 模块的 connector）'
+        description: '公共模块变更策略：affected（按 Maven 传递依赖筛选，默认）或 all（保守全量）'
         required: false
         type: string
-        default: 'all'
+        default: 'affected'
       connectors_override:
         description: '手工指定模块列表（逗号分隔的模块相对路径），跳过 diff 分析；用于 workflow_dispatch 调试'
         required: false
@@ -55,165 +55,194 @@ jobs:
       - name: Analyze changed connectors
         id: analyze
         shell: bash
+        env:
+          CONNECTORS_OVERRIDE: ${{ inputs.connectors_override }}
+          COMMON_STRATEGY: ${{ inputs.common_changed_strategy }}
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
-          set -euo pipefail
-          trap 'echo "analyze failed at line ${LINENO}"' ERR
+          # BEGIN dependency analyzer (tested directly by tests/ci/test_it_selection.py)
+          python3 - <<'PY'
+          import collections
+          import json
+          import os
+          import re
+          import subprocess
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
 
-          # 所有数组与标志位在顶层声明，避免分支内 declare 的作用域问题
-          declare -A CHANGED_MODULES=()
-          declare -A RESULT=()
-          ALL_MODULES=false
-          COMMON_CHANGED=false
+          def git(*args):
+              return subprocess.check_output(["git", *args], text=True).strip()
 
-          # ---------- 1. 手工指定模块（workflow_dispatch 调试） ----------
-          OVERRIDE="${{ inputs.connectors_override }}"
-          if [[ -n "${OVERRIDE}" ]]; then
-            IFS=',' read -ra TMP <<< "${OVERRIDE}"
-            for m in "${TMP[@]}"; do
-              m=$(echo "$m" | xargs)
-              if [[ -n "$m" && -f "$m/pom.xml" ]]; then
-                RESULT["$m"]=1
-              fi
-            done
-          else
-            # ---------- 2. 计算本次变更的文件列表 ----------
-            CHANGED_FILES=""
-            if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-              BASE_REF="${{ github.event.pull_request.base.ref }}"
-              if [[ ! "${BASE_REF}" =~ ^[A-Za-z0-9_./-]+$ ]]; then
-                echo "Invalid base ref: ${BASE_REF}"
-                exit 1
-              fi
-              git fetch origin "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
-              CHANGED_FILES=$(git diff --name-only "origin/${BASE_REF}...HEAD" || true)
-            else
-              BEFORE="${{ github.event.before }}"
-              if [[ -n "${BEFORE}" && ! "${BEFORE}" =~ ^[0-9a-f]{40}$ && ! "${BEFORE}" =~ ^0+$ ]]; then
-                echo "Invalid before sha: ${BEFORE}"
-                exit 1
-              fi
-              if [[ -z "${BEFORE}" || "${BEFORE}" =~ ^0+$ ]]; then
-                # 新分支首次推送（或无 before 上下文）：取本次 HEAD 提交涉及的文件
-                CHANGED_FILES=$(git diff-tree --no-commit-id --name-only -r HEAD || true)
-              else
-                CHANGED_FILES=$(git diff --name-only "${BEFORE}...HEAD" || true)
-              fi
-            fi
-            echo "=== Changed files ==="
-            echo "${CHANGED_FILES}"
+          def parse_pom(text):
+              root = ET.fromstring(text)
+              for element in root.iter():
+                  element.tag = element.tag.rsplit("}", 1)[-1]
+              return root
 
-            # ---------- 3. 变更文件 → Maven 模块映射 ----------
-            while IFS= read -r f; do
-              if [[ -z "$f" ]]; then
-                continue
-              fi
-              case "$f" in
-                pom.xml | connectors/pom.xml | connectors-common/pom.xml | connectors-javascript/pom.xml | file-storages/pom.xml)
-                  # 聚合 POM 变更影响全部子模块，保守全量（必须在模块模式之前匹配）
-                  ALL_MODULES=true
-                  ;;
-                connectors/* | connectors-common/* | connectors-javascript/* | file-storages/*)
-                  m=$(echo "$f" | cut -d/ -f1-2)
-                  if [[ -f "$m/pom.xml" ]]; then
-                    CHANGED_MODULES["$m"]=1
-                    if [[ "$m" == connectors-common/* ]]; then
-                      COMMON_CHANGED=true
-                    fi
-                  fi
-                  ;;
-              esac
-            done <<< "${CHANGED_FILES}"
-          fi
+          def dependency_graph(poms):
+              roots = {path: parse_pom(text) for path, text in poms.items()}
+              reverse = collections.defaultdict(set)
+              coordinates = collections.defaultdict(set)
+              properties = {}
+              parents = {}
 
-          # ---------- 4. 收集含 IT 用例的候选模块 ----------
-          collect_candidates() {
-            local top d m
-            for top in connectors connectors-javascript; do
-              [[ -d "$top" ]] || continue
-              for d in "$top"/*/; do
-                [[ -d "$d" ]] || continue
-                m="${d%/}"
-                if [[ -f "$m/pom.xml" && -d "$m/src/it/java" ]]; then
-                  echo "$m"
-                fi
-              done
-            done
-            if [[ -d connectors-common ]]; then
-              for d in connectors-common/*/; do
-                [[ -d "$d" ]] || continue
-                m="${d%/}"
-                if [[ -f "$m/pom.xml" && -d "$m/src/it/java" ]]; then
-                  echo "$m"
-                fi
-              done
-            fi
-          }
+              def values(path, visiting=None):
+                  if path in properties:
+                      return properties[path]
+                  visiting = set() if visiting is None else visiting
+                  if path in visiting:
+                      raise ValueError("Cyclic Maven parent: " + path)
+                  root = roots[path]
+                  parent = root.find("parent")
+                  result = {}
+                  if parent is not None:
+                      relative = parent.find("relativePath")
+                      relative = "../pom.xml" if relative is None else (relative.text or "")
+                      if relative:
+                          candidate = os.path.normpath(str(Path(path).parent / relative))
+                          if candidate in roots:
+                              parents[path] = candidate
+                              result.update(values(candidate, visiting | {path}))
+                      result["project.parent.groupId"] = parent.findtext("groupId", "")
+                  for prop in root.findall("./properties/*") + root.findall("./profiles/profile/properties/*"):
+                      result[prop.tag] = prop.text or ""
+                  group = root.findtext("groupId") or result.get("project.groupId") or result.get("project.parent.groupId", "")
+                  result.update({"project.groupId": group, "pom.groupId": group,
+                                 "project.artifactId": root.findtext("artifactId", "")})
+                  properties[path] = result
+                  return result
 
-          # ---------- 5. 决策：确定本次需要执行 IT 的模块 ----------
-          if [[ "${ALL_MODULES}" == "true" ]]; then
-            while read -r m; do
-              if [[ -n "$m" ]]; then
-                RESULT["$m"]=1
-              fi
-            done < <(collect_candidates)
-          elif [[ "${COMMON_CHANGED}" == "true" ]]; then
-            if [[ "${{ inputs.common_changed_strategy }}" == "affected" ]]; then
-              # 精确模式：直接修改的模块 + 通过 pom.xml 依赖分析圈定受影响 connector
-              for m in "${!CHANGED_MODULES[@]}"; do
-                if [[ "$m" == connectors-common/* ]]; then
-                  aid=$(awk '/<parent>/{p=1} /<\/parent>/{p=0} !p && /<artifactId>/{gsub(/.*<artifactId>|<\/artifactId>.*/, ""); print; exit}' "$m/pom.xml")
-                  if [[ -z "$aid" ]]; then
-                    aid=$(basename "$m")
-                  fi
-                  for c in connectors/*/pom.xml connectors-javascript/*/pom.xml; do
-                    if [[ ! -f "$c" ]]; then
-                      continue
-                    fi
-                    if grep -q "<artifactId>${aid}</artifactId>" "$c"; then
-                      cm="${c%/pom.xml}"
-                      if [[ -d "$cm/src/it/java" ]]; then
-                        RESULT["$cm"]=1
-                      fi
-                    fi
-                  done
-                else
-                  if [[ -d "$m/src/it/java" ]]; then
-                    RESULT["$m"]=1
-                  fi
-                fi
-              done
-            else
-              # 保守模式：common 变更影响面不确定，运行全部有 IT 的模块
-              while read -r m; do
-                if [[ -n "$m" ]]; then
-                  RESULT["$m"]=1
-                fi
-              done < <(collect_candidates)
-            fi
-          else
-            # 常规：仅运行被修改且含 IT 的模块
-            for m in "${!CHANGED_MODULES[@]}"; do
-              if [[ -d "$m/src/it/java" ]]; then
-                RESULT["$m"]=1
-              fi
-            done
-          fi
+              def resolve(value, props):
+                  value = value or ""
+                  for _ in range(20):
+                      updated = re.sub(r"\$\{([^}]+)\}", lambda match: props.get(match[1], match[0]), value)
+                      if updated == value:
+                          break
+                      value = updated
+                  return value
 
-          # ---------- 6. 输出 JSON 模块列表 ----------
-          RESULT_JSON="[]"
-          if [[ ${#RESULT[@]} -gt 0 ]]; then
-            RESULT_JSON=$(printf '%s\n' "${!RESULT[@]}" | sort -u | jq -R . | jq -s -c .)
-          fi
-          echo "connectors=${RESULT_JSON}" >> "$GITHUB_OUTPUT"
-          if [[ "${RESULT_JSON}" == "[]" ]]; then
-            echo "has_changes=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_changes=true" >> "$GITHUB_OUTPUT"
-          fi
-          echo "=== Selected modules for IT ==="
-          echo "${RESULT_JSON}"
+              for path, root in roots.items():
+                  props = values(path)
+                  key = (resolve(props["project.groupId"], props), resolve(root.findtext("artifactId"), props))
+                  coordinates[key].add(path)
+              for path, root in roots.items():
+                  props = properties[path]
+                  if path in parents:
+                      reverse[parents[path]].add(path)
+                  # Aggregate POM changes affect their children, not unrelated reactors.
+                  for module in root.findall("./modules/module") + root.findall("./profiles/profile/modules/module"):
+                      child = os.path.normpath(str(Path(path).parent / (module.text or "") / "pom.xml"))
+                      if child in roots:
+                          reverse[path].add(child)
+                  # Include profile, managed/BOM and plugin dependencies conservatively.
+                  references = root.findall(".//dependency") + root.findall("./parent")
+                  for dependency in references:
+                      group = resolve(dependency.findtext("groupId"), props)
+                      artifact = resolve(dependency.findtext("artifactId"), props)
+                      if "${" in group or "${" in artifact:
+                          raise ValueError("Unresolved Maven dependency coordinate in " + path)
+                      for upstream in coordinates.get((group, artifact), ()):
+                          if upstream != path:
+                              reverse[upstream].add(path)
+              return reverse
 
-  # 矩阵执行：每个被修改的 connector 独立跑集成测试
+          def affected_modules(changed, graphs, pom_paths, candidates, strategy="affected"):
+              if "pom.xml" in changed:
+                  return sorted(candidates)
+              if strategy == "all" and any(path.startswith("connectors-common/") for path in changed):
+                  return sorted(candidates)
+              reverse = collections.defaultdict(set)
+              for graph in graphs:
+                  for upstream, downstream in graph.items():
+                      reverse[upstream].update(downstream)
+              seeds = set()
+              for filename in changed:
+                  directory = Path(filename).parent
+                  while str(directory) != ".":
+                      pom = str(directory / "pom.xml")
+                      if pom in pom_paths:
+                          seeds.add(pom)
+                          break
+                      directory = directory.parent
+              seen = set(seeds)
+              pending = list(seeds)
+              while pending:
+                  for downstream in reverse.get(pending.pop(), ()):
+                      if downstream not in seen:
+                          seen.add(downstream)
+                          pending.append(downstream)
+              return sorted(module for module in candidates if module + "/pom.xml" in seen)
+
+          def main():
+              candidates = discover_candidates()
+              override = os.environ.get("CONNECTORS_OVERRIDE", "")
+              strategy = os.environ.get("COMMON_STRATEGY", "affected")
+              if strategy not in ("all", "affected"):
+                  raise ValueError("Invalid common_changed_strategy")
+              if override.strip():
+                  selected = sorted({module.strip() for module in override.split(",") if module.strip()})
+                  validate_modules(selected)
+                  if not all(module in candidates for module in selected):
+                      raise ValueError("Override must name existing modules with src/it/java")
+              else:
+                  if os.environ.get("EVENT_NAME") == "pull_request":
+                      base = os.environ["BASE_REF"]
+                      git("fetch", "origin", "+refs/heads/" + base + ":refs/remotes/origin/" + base)
+                      base = git("merge-base", "HEAD", "origin/" + base)
+                  else:
+                      base = os.environ.get("BEFORE_SHA", "")
+                      if not base or not base.strip("0"):
+                          try:
+                              base = git("rev-parse", "HEAD^")
+                          except subprocess.CalledProcessError:
+                              base = ""
+                  changed = git("diff", "--name-only", base, "HEAD").splitlines() if base else ["pom.xml"]
+                  print("Changed files:", json.dumps(changed))
+                  try:
+                      graphs = []
+                      pom_paths = set()
+                      # Union old/new graphs: removals and dependency rewrites must not hide affected consumers.
+                      for revision in (base or "HEAD", "HEAD"):
+                          paths = [path for path in git("ls-tree", "-r", "--name-only", revision).splitlines()
+                                   if path == "pom.xml" or path.endswith("/pom.xml")]
+                          poms = {path: git("show", revision + ":" + path) for path in paths}
+                          pom_paths.update(paths)
+                          graphs.append(dependency_graph(poms))
+                      selected = affected_modules(changed, graphs, pom_paths, candidates, strategy)
+                  except (ET.ParseError, ValueError, subprocess.CalledProcessError) as error:
+                      print("Dependency analysis incomplete; conservatively running all IT:", error)
+                      selected = sorted(candidates)
+              print("Selected IT modules:", json.dumps(selected))
+              with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                  output.write("connectors=" + json.dumps(selected, separators=(",", ":")) + "\n")
+                  output.write("has_changes=" + str(bool(selected)).lower() + "\n")
+
+          def supported_module(module):
+              return re.fullmatch(r"(connectors|connectors-common|connectors-javascript|file-storages)/[A-Za-z0-9_][A-Za-z0-9_.-]*(/[A-Za-z0-9_][A-Za-z0-9_.-]*)*", module) is not None
+
+          def discover_candidates():
+              # Discover only supported module trees; unrelated IT suites are not connector IT.
+              candidates = set()
+              for prefix in ("connectors", "connectors-common", "connectors-javascript", "file-storages"):
+                  for path in Path(prefix).glob("**/src/it/java"):
+                      module = path.parents[2]
+                      if supported_module(str(module)) and path.is_dir() and (module / "pom.xml").is_file():
+                          candidates.add(str(module))
+              return candidates
+
+          def validate_modules(modules):
+              for module in modules:
+                  if not supported_module(module):
+                      raise ValueError("Unsafe or unsupported IT module path: " + repr(module))
+
+          if __name__ == "__main__":
+              main()
+          PY
+          # END dependency analyzer
+
+  # 矩阵执行：每个受传递依赖影响的 connector 独立跑集成测试
   test:
     name: IT - ${{ matrix.connector }}
     needs: analyze
@@ -249,14 +278,15 @@ jobs:
       - name: Compute connector short name
         id: name
         shell: bash
+        env:
+          CONNECTOR: ${{ matrix.connector }}
         run: |
-          SAFE="$(echo '${{ matrix.connector }}' | tr '/' '-')"
+          SAFE="$(printf '%s' "$CONNECTOR" | tr '/' '-')"
           echo "safe=${SAFE}" >> "$GITHUB_OUTPUT"
           echo "label=${SAFE}" >> "$GITHUB_OUTPUT"
 
       # 检查 JDK 可用性：runner 镜像已预装 JDK 17（/usr/java/jdk-17.0.12），
-      # 不使用 actions/setup-java 下载安装；Maven 本地仓库由 runner 容器挂载共享 PVC
-      # 持久化。所有 Maven 写入必须使用与 build/scan runner 相同的 flock。
+      # 不使用 actions/setup-java 下载安装；每个 Runner 使用独立的持久化 Maven 本地仓库。
       - name: Check JDK 17 and set JAVA_HOME
         shell: bash
         run: |
@@ -272,10 +302,72 @@ jobs:
 
       - name: Configure Maven settings and SSL
         shell: bash
+        env:
+          MAVEN_SETTINGS_CONTENT: ${{ secrets.MAVEN_SETTINGS }}
         run: |
-          if [[ -n "${{ secrets.MAVEN_SETTINGS }}" ]]; then
-            mkdir -p "$HOME/.m2"
-            echo "${{ secrets.MAVEN_SETTINGS }}" > "$HOME/.m2/settings.xml"
+          if [[ -n "$MAVEN_SETTINGS_CONTENT" ]]; then
+            umask 077
+            settings=$(mktemp "$RUNNER_TEMP/tapdata-maven-settings.XXXXXX")
+            # BEGIN Maven settings merge
+            python3 - "$HOME/.m2/settings.xml" "$settings" <<'PY'
+            import copy
+            import os
+            import sys
+            import xml.etree.ElementTree as ET
+            from pathlib import Path
+
+            def merge_settings(base_xml, secret_xml):
+                base = ET.fromstring(base_xml)
+                secret = ET.fromstring(secret_xml)
+                for root in (base, secret):
+                    for node in root.iter():
+                        node.tag = node.tag.rsplit("}", 1)[-1]
+                    if root.tag != "settings":
+                        raise ValueError("Maven settings root must be settings")
+                merged = copy.deepcopy(base)
+                for section in secret:
+                    # Runner routing and cache isolation cannot be overridden by a secret.
+                    if section.tag in ("mirrors", "localRepository"):
+                        continue
+                    existing = merged.find(section.tag)
+                    if section.tag in ("servers", "profiles", "pluginGroups", "activeProfiles"):
+                        if existing is None:
+                            merged.append(copy.deepcopy(section))
+                            continue
+                        for item in section:
+                            key = item.findtext("id") if section.tag in ("servers", "profiles") else item.text
+                            for old in list(existing):
+                                old_key = old.findtext("id") if section.tag in ("servers", "profiles") else old.text
+                                if old_key == key:
+                                    existing.remove(old)
+                            existing.append(copy.deepcopy(item))
+                    else:
+                        if existing is not None:
+                            merged.remove(existing)
+                        merged.append(copy.deepcopy(section))
+                groups = merged.find("pluginGroups")
+                if groups is None:
+                    groups = ET.SubElement(merged, "pluginGroups")
+                if not any(node.text == "org.sonarsource.scanner.maven" for node in groups):
+                    ET.SubElement(groups, "pluginGroup").text = "org.sonarsource.scanner.maven"
+                # Fail rather than silently losing the runner's required Nexus mirror.
+                if not any(m.findtext("id") == "tapdata-nexus"
+                           and m.findtext("mirrorOf") == "*"
+                           and m.findtext("url") == "https://nexus.tapdata.net/repository/maven-public/"
+                           for m in merged.findall("./mirrors/mirror")):
+                    raise ValueError("Runner settings must define the tapdata-nexus mirror")
+                return ET.tostring(merged, encoding="unicode")
+
+            if __name__ == "__main__":
+                base_path = Path(sys.argv[1])
+                if not base_path.is_file():
+                    raise SystemExit("Runner Maven settings missing; refusing to replace with secret")
+                content = merge_settings(base_path.read_text(), os.environ["MAVEN_SETTINGS_CONTENT"])
+                Path(sys.argv[2]).write_text(content)
+                os.chmod(sys.argv[2], 0o600)
+            PY
+            # END Maven settings merge
+            echo "MAVEN_JOB_SETTINGS=$settings" >> "$GITHUB_ENV"
           fi
           # 自托管 runner 环境：内网 Nexus 使用自签名证书，跳过 SSL 验证
           echo "MAVEN_OPTS=-Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true" >> "$GITHUB_ENV"
@@ -284,34 +376,51 @@ jobs:
       # 保证 connector 依赖链（-am）之外的公共模块也能从本地仓库解析，避免矩阵任务重复全量安装；
       # 模块列表从 <modules> 声明提取而非扫描目录，避免未声明的游离目录（如 build/dist）破坏 -pl；
       # SSL 参数显式写在命令上（不依赖 MAVEN_OPTS），覆盖自签名证书的内网 Nexus
-      - name: Install connectors-common modules (skip all tests)
+      - name: Resolve connectors-common modules
+        id: common-modules
         shell: bash
         run: |
           if [[ -f connectors-common/pom.xml ]]; then
-            COMMON_MODULES="$(awk '/^[[:space:]]*<module>/{gsub(/.*<module>|<\/module>.*/, ""); print "connectors-common/"$0}' connectors-common/pom.xml | paste -sd, -)"
-            if [[ -n "${COMMON_MODULES}" ]]; then
-              lock_file="${MAVEN_CACHE_LOCK_FILE:-/root/.m2/.tapdata-maven-build.lock}"
-              (
-                flock -x 9
-                mvn -U -B install -pl "connectors-common,${COMMON_MODULES}" -am \
-                  -DskipITs=true -DskipTests -Dmaven.javadoc.skip=true -q \
-                  -Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true
-              ) 9>"$lock_file"
-            fi
+            modules="$(awk '/^[[:space:]]*<module>/{gsub(/.*<module>|<\/module>.*/, ""); print "connectors-common/"$0}' connectors-common/pom.xml | paste -sd, -)"
+            echo "modules=${modules}" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Install connectors-common modules (skip all tests)
+        if: steps.common-modules.outputs.modules != ''
+        uses: tapdata/tapdata-it/.github/actions/maven-retry@main
+        with:
+          args: |
+            -U
+            -B
+            install
+            -pl
+            connectors-common,${{ steps.common-modules.outputs.modules }}
+            -am
+            -DskipITs=true
+            -DskipTests
+            -Dmaven.javadoc.skip=true
+            -q
+            -Dmaven.wagon.http.ssl.insecure=true
+            -Dmaven.wagon.http.ssl.allowall=true
       
       # 第一步：安装依赖链（-am 会带入 connectors-common 等依赖模块）但不执行任何测试，
       # 防止公共模块自身的 IT 被连带执行；SSL 参数同上（内网 Nexus 自签名证书）
       - name: Install dependency chain (skip all tests)
-        shell: bash
-        run: |
-          lock_file="${MAVEN_CACHE_LOCK_FILE:-/root/.m2/.tapdata-maven-build.lock}"
-          (
-            flock -x 9
-            mvn -U -B install -pl "${{ matrix.connector }}" -am \
-              -DskipITs=true -DskipTests -Dmaven.javadoc.skip=true -q \
-              -Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true
-          ) 9>"$lock_file"
+        uses: tapdata/tapdata-it/.github/actions/maven-retry@main
+        with:
+          args: |
+            -U
+            -B
+            install
+            -pl
+            ${{ matrix.connector }}
+            -am
+            -DskipITs=true
+            -DskipTests
+            -Dmaven.javadoc.skip=true
+            -q
+            -Dmaven.wagon.http.ssl.insecure=true
+            -Dmaven.wagon.http.ssl.allowall=true
       
       # 第二步：仅目标模块执行 failsafe 集成测试。
       # test-compile 触发 build-helper 将 src/it/java 加入测试源码并编译；
@@ -319,15 +428,18 @@ jobs:
       # （规避 JDK 17+/Byte Buddy 兼容问题，与本地实践一致）；
       # -DskipITs=false 覆盖各 connector pom 中默认的 skipITs=true；SSL 参数同上
       - name: Run integration tests
-        shell: bash
-        run: |
-          lock_file="${MAVEN_CACHE_LOCK_FILE:-/root/.m2/.tapdata-maven-build.lock}"
-          (
-            flock -x 9
-            cd "${{ matrix.connector }}"
-            mvn -U -B test-compile failsafe:integration-test failsafe:verify -DskipITs=false \
-              -Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true
-          ) 9>"$lock_file"
+        uses: tapdata/tapdata-it/.github/actions/maven-retry@main
+        with:
+          working-directory: ${{ matrix.connector }}
+          args: |
+            -U
+            -B
+            test-compile
+            failsafe:integration-test
+            failsafe:verify
+            -DskipITs=false
+            -Dmaven.wagon.http.ssl.insecure=true
+            -Dmaven.wagon.http.ssl.allowall=true
 
       # 报告打包上传（失败也上传），artifact 名称关联仓库 owner、模块与 commit SHA
       - name: Upload failsafe reports
@@ -344,9 +456,11 @@ jobs:
       - name: Summarize results
         if: always()
         shell: bash
+        env:
+          CONNECTOR: ${{ matrix.connector }}
         run: |
           {
-            echo "## IT results: \`${{ matrix.connector }}\`"
+            printf '## IT results: `%s`\n' "$CONNECTOR"
             echo ""
             echo "- 事件: ${{ github.event_name }}"
             if [[ "${{ github.event_name }}" == "pull_request" ]]; then
@@ -357,6 +471,14 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       # 收尾：无论成败清理 SOCKS 代理进程
+      - name: Remove temporary Maven settings
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${MAVEN_JOB_SETTINGS:-}" && "$MAVEN_JOB_SETTINGS" == "$RUNNER_TEMP"/tapdata-maven-settings.* ]]; then
+            rm -f -- "$MAVEN_JOB_SETTINGS"
+          fi
+
       - name: Stop SOCKS proxy
         if: always()
         shell: bash
