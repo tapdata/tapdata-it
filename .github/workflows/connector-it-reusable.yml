@@ -310,62 +310,62 @@ jobs:
             settings=$(mktemp "$RUNNER_TEMP/tapdata-maven-settings.XXXXXX")
             # BEGIN Maven settings merge
             python3 - "$HOME/.m2/settings.xml" "$settings" <<'PY'
-            import copy
-            import os
-            import sys
-            import xml.etree.ElementTree as ET
-            from pathlib import Path
+          import copy
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
 
-            def merge_settings(base_xml, secret_xml):
-                base = ET.fromstring(base_xml)
-                secret = ET.fromstring(secret_xml)
-                for root in (base, secret):
-                    for node in root.iter():
-                        node.tag = node.tag.rsplit("}", 1)[-1]
-                    if root.tag != "settings":
-                        raise ValueError("Maven settings root must be settings")
-                merged = copy.deepcopy(base)
-                for section in secret:
-                    # Runner routing and cache isolation cannot be overridden by a secret.
-                    if section.tag in ("mirrors", "localRepository"):
-                        continue
-                    existing = merged.find(section.tag)
-                    if section.tag in ("servers", "profiles", "pluginGroups", "activeProfiles"):
-                        if existing is None:
-                            merged.append(copy.deepcopy(section))
-                            continue
-                        for item in section:
-                            key = item.findtext("id") if section.tag in ("servers", "profiles") else item.text
-                            for old in list(existing):
-                                old_key = old.findtext("id") if section.tag in ("servers", "profiles") else old.text
-                                if old_key == key:
-                                    existing.remove(old)
-                            existing.append(copy.deepcopy(item))
-                    else:
-                        if existing is not None:
-                            merged.remove(existing)
-                        merged.append(copy.deepcopy(section))
-                groups = merged.find("pluginGroups")
-                if groups is None:
-                    groups = ET.SubElement(merged, "pluginGroups")
-                if not any(node.text == "org.sonarsource.scanner.maven" for node in groups):
-                    ET.SubElement(groups, "pluginGroup").text = "org.sonarsource.scanner.maven"
-                # Fail rather than silently losing the runner's required Nexus mirror.
-                if not any(m.findtext("id") == "tapdata-nexus"
-                           and m.findtext("mirrorOf") == "*"
-                           and m.findtext("url") == "https://nexus.tapdata.net/repository/maven-public/"
-                           for m in merged.findall("./mirrors/mirror")):
-                    raise ValueError("Runner settings must define the tapdata-nexus mirror")
-                return ET.tostring(merged, encoding="unicode")
+          def merge_settings(base_xml, secret_xml):
+              base = ET.fromstring(base_xml)
+              secret = ET.fromstring(secret_xml)
+              for root in (base, secret):
+                  for node in root.iter():
+                      node.tag = node.tag.rsplit("}", 1)[-1]
+                  if root.tag != "settings":
+                      raise ValueError("Maven settings root must be settings")
+              merged = copy.deepcopy(base)
+              for section in secret:
+                  # Runner routing and cache isolation cannot be overridden by a secret.
+                  if section.tag in ("mirrors", "localRepository"):
+                      continue
+                  existing = merged.find(section.tag)
+                  if section.tag in ("servers", "profiles", "pluginGroups", "activeProfiles"):
+                      if existing is None:
+                          merged.append(copy.deepcopy(section))
+                          continue
+                      for item in section:
+                          key = item.findtext("id") if section.tag in ("servers", "profiles") else item.text
+                          for old in list(existing):
+                              old_key = old.findtext("id") if section.tag in ("servers", "profiles") else old.text
+                              if old_key == key:
+                                  existing.remove(old)
+                          existing.append(copy.deepcopy(item))
+                  else:
+                      if existing is not None:
+                          merged.remove(existing)
+                      merged.append(copy.deepcopy(section))
+              groups = merged.find("pluginGroups")
+              if groups is None:
+                  groups = ET.SubElement(merged, "pluginGroups")
+              if not any(node.text == "org.sonarsource.scanner.maven" for node in groups):
+                  ET.SubElement(groups, "pluginGroup").text = "org.sonarsource.scanner.maven"
+              # Fail rather than silently losing the runner's required Nexus mirror.
+              if not any(m.findtext("id") == "tapdata-nexus"
+                         and m.findtext("mirrorOf") == "*"
+                         and m.findtext("url") == "https://nexus.tapdata.net/repository/maven-public/"
+                         for m in merged.findall("./mirrors/mirror")):
+                  raise ValueError("Runner settings must define the tapdata-nexus mirror")
+              return ET.tostring(merged, encoding="unicode")
 
-            if __name__ == "__main__":
-                base_path = Path(sys.argv[1])
-                if not base_path.is_file():
-                    raise SystemExit("Runner Maven settings missing; refusing to replace with secret")
-                content = merge_settings(base_path.read_text(), os.environ["MAVEN_SETTINGS_CONTENT"])
-                Path(sys.argv[2]).write_text(content)
-                os.chmod(sys.argv[2], 0o600)
-            PY
+          if __name__ == "__main__":
+              base_path = Path(sys.argv[1])
+              if not base_path.is_file():
+                  raise SystemExit("Runner Maven settings missing; refusing to replace with secret")
+              content = merge_settings(base_path.read_text(), os.environ["MAVEN_SETTINGS_CONTENT"])
+              Path(sys.argv[2]).write_text(content)
+              os.chmod(sys.argv[2], 0o600)
+          PY
             # END Maven settings merge
             echo "MAVEN_JOB_SETTINGS=$settings" >> "$GITHUB_ENV"
           fi
