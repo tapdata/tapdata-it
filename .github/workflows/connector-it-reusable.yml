@@ -73,7 +73,16 @@ jobs:
           from pathlib import Path
 
           def git(*args):
-              return subprocess.check_output(["git", *args], text=True).strip()
+              return subprocess.check_output(["git", *args], text=True, timeout=120).strip()
+
+          def ensure_base_commit(base):
+              try:
+                  git("cat-file", "-e", base + "^{commit}")
+              except subprocess.CalledProcessError:
+                  # A force-push can make event.before unreachable even with fetch-depth: 0.
+                  print("Baseline commit missing locally; fetching exact commit:", base)
+                  git("fetch", "--no-tags", "--depth=1", "origin", base)
+                  git("cat-file", "-e", base + "^{commit}")
 
           def parse_pom(text):
               root = ET.fromstring(text)
@@ -187,20 +196,22 @@ jobs:
                   if not all(module in candidates for module in selected):
                       raise ValueError("Override must name existing modules with src/it/java")
               else:
-                  if os.environ.get("EVENT_NAME") == "pull_request":
-                      base = os.environ["BASE_REF"]
-                      git("fetch", "origin", "+refs/heads/" + base + ":refs/remotes/origin/" + base)
-                      base = git("merge-base", "HEAD", "origin/" + base)
-                  else:
-                      base = os.environ.get("BEFORE_SHA", "")
-                      if not base or not base.strip("0"):
-                          try:
-                              base = git("rev-parse", "HEAD^")
-                          except subprocess.CalledProcessError:
-                              base = ""
-                  changed = git("diff", "--name-only", base, "HEAD").splitlines() if base else ["pom.xml"]
-                  print("Changed files:", json.dumps(changed))
                   try:
+                      if os.environ.get("EVENT_NAME") == "pull_request":
+                          base = os.environ["BASE_REF"]
+                          git("fetch", "origin", "+refs/heads/" + base + ":refs/remotes/origin/" + base)
+                          base = git("merge-base", "HEAD", "origin/" + base)
+                      else:
+                          base = os.environ.get("BEFORE_SHA", "")
+                          if not base or not base.strip("0"):
+                              try:
+                                  base = git("rev-parse", "HEAD^")
+                              except subprocess.CalledProcessError:
+                                  base = ""
+                      if base:
+                          ensure_base_commit(base)
+                      changed = git("diff", "--name-only", base, "HEAD").splitlines() if base else ["pom.xml"]
+                      print("Changed files:", json.dumps(changed))
                       graphs = []
                       pom_paths = set()
                       # Union old/new graphs: removals and dependency rewrites must not hide affected consumers.
@@ -211,7 +222,7 @@ jobs:
                           pom_paths.update(paths)
                           graphs.append(dependency_graph(poms))
                       selected = affected_modules(changed, graphs, pom_paths, candidates, strategy)
-                  except (ET.ParseError, ValueError, subprocess.CalledProcessError) as error:
+                  except (ET.ParseError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
                       print("Dependency analysis incomplete; conservatively running all IT:", error)
                       selected = sorted(candidates)
               print("Selected IT modules:", json.dumps(selected))
