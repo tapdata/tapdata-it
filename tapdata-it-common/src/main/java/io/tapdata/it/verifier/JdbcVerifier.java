@@ -186,7 +186,11 @@ public class JdbcVerifier implements ConnectorVerifier {
                 }
                 ps.executeBatch();
             } catch (java.sql.SQLException e) {
-                throw new RuntimeException(e);
+                StringBuilder detail = new StringBuilder(e.getMessage());
+                for (java.sql.SQLException next = e.getNextException(); next != null; next = next.getNextException()) {
+                    detail.append("; next exception: ").append(next.getMessage());
+                }
+                throw new RuntimeException(detail.toString(), e);
             }
         });
     }
