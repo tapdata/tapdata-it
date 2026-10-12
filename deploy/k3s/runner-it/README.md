@@ -1,5 +1,27 @@
 # K3s runner-it
 
+## Configuration audit (2026-10-12)
+
+The manifests have been checked against all 16 live Deployment definitions
+(24 runner replicas). Images use `github-action-runner:5.12`; build-common and
+IT pools keep 4 CPU / 12Gi limits, while enterprise/cloud/scan pools keep
+4 CPU / 8Gi limits. Requests remain 2 CPU / 4Gi. This change does not deploy
+or restart any runner, change pool concurrency, or modify workflow ordering.
+
+The cache-prune CronJob is new and was not present in the live cluster at
+audit time. It schedules at 03:17 Asia/Hong_Kong with `DRY_RUN=true`; deletion
+requires explicit operator approval and a subsequent configuration change.
+The cache seed Job is deliberately excluded from `kustomization.yaml`.
+
+The existing `buildserver.tapdata.io` host alias still points at the legacy
+170 server, including in the live deployments. It is not the Harbor alias.
+Do not interpret this PR as removing every dependency on 170: inspect callers
+and migrate the buildserver service separately before retiring that host.
+Likewise, runner host aliases do not configure DNS inside external BuildKit
+containers; Harbor DNS must be maintained at the infrastructure layer.
+
+Python bytecode (`__pycache__`, `*.pyc`) is ignored, not a deployment asset.
+
 This deployment runs the four `runner-it` instances plus the remaining build,
 cloud, scan, and common-build pools on the `tapserver193` K3s node. All pools
 use the same node-local persistent cache PVCs so a Pod restart does not discard
