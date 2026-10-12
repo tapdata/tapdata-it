@@ -1933,8 +1933,11 @@ public abstract class ConnectorIT {
         assertNull(streamReadError.get(), () -> "streamRead terminated before startup: " + describeThrowable(streamReadError.get()));
         assertEquals(StreamReadConsumer.STATE_STREAM_READ_STARTED, consumer.getState(), "streamRead did not report started state");
         // 旁路执行非加/删列 DDL，随后写入哨兵行
-        verifier().createIndex(spec.getTableName(), "idx_it_ddl_cap", "c_int");
-        verifier().createConstraint(spec.getTableName(), "uq_it_ddl_cap", "c_int");
+        // SQL Server enforces constraint names at schema scope. Include the per-run
+        // table name so a previous or concurrent IT run cannot collide here.
+        String ddlObjectSuffix = spec.getTableName();
+        verifier().createIndex(spec.getTableName(), "idx_it_ddl_cap_" + ddlObjectSuffix, "c_int");
+        verifier().createConstraint(spec.getTableName(), "uq_it_ddl_cap_" + ddlObjectSuffix, "c_int");
         bypassInsert(generateRows(1));
         boolean got = sentinelLatch.await(streamReadTimeoutSeconds(), TimeUnit.SECONDS);
         assertNull(streamReadError.get(), () -> "streamRead terminated after index/constraint DDL: " + describeThrowable(streamReadError.get()));
