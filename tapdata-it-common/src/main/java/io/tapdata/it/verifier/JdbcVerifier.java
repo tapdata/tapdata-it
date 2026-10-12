@@ -291,6 +291,17 @@ public class JdbcVerifier implements ConnectorVerifier {
     }
 
     @Override
+    public void executeDdl(String sql) throws Exception {
+        withAutoCommit(conn -> {
+            try (Statement st = conn.createStatement()) {
+                st.execute(sql);
+            } catch (java.sql.SQLException e) {
+                throw new RuntimeException(e);
+            }
+        });
+    }
+
+    @Override
     public void dropTable(String table) throws Exception {
         final String sql = "DROP TABLE " + qualifiedTable(table);
         withAutoCommit(conn -> {
