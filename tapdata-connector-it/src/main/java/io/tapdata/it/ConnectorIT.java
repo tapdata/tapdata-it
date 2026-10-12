@@ -309,6 +309,27 @@ public abstract class ConnectorIT {
     protected void prepareStreamReadTable() throws Exception {
     }
 
+    /** 子类可覆写：true 表示 streamRead 能采集源端 DDL（开启 should_stream_read_source_ddl_and_continue_dml） */
+    protected boolean supportsSourceDdlCapture() {
+        return false;
+    }
+
+    /**
+     * 子类可覆写：源端 DDL 采集用例依次执行的语句（默认 ANSI 写法：加列 → 改名 → 删列，
+     * 最终表结构与原表一致，后续可继续用 generateRows 旁路插入哨兵行）。
+     * <p>
+     * TAP-13061 回归：包含多空格 ADD CONSTRAINT 语句，验证不会被误判为 ADD COLUMN。
+     */
+    protected List<String> sourceDdlStatements(String table) {
+        return List.of(
+                "ALTER TABLE " + table + " ADD COLUMN c_ddl_probe varchar(64)",
+                // TAP-13061 回归场景：多空格 ADD CONSTRAINT（旧版正则会误判为加列）
+                "ALTER TABLE " + table + "  ADD  CONSTRAINT  chk_ddl_probe CHECK (c_ddl_probe IS NULL OR length(c_ddl_probe) < 100)",
+                "ALTER TABLE " + table + " RENAME COLUMN c_ddl_probe TO c_ddl_probe_new",
+                "ALTER TABLE " + table + " DROP CONSTRAINT chk_ddl_probe",
+                "ALTER TABLE " + table + " DROP COLUMN c_ddl_probe_new");
+    }
+
     /** 子类可覆写：测试表名前缀 */
     protected String tablePrefix() {
         return "_tap_it_";
@@ -1841,6 +1862,119 @@ public abstract class ConnectorIT {
                         truthRow.get(field.getName()), actRow.get(field.getName()), field.getName());
             }
         }
+    }
+
+    /**
+     * 源端 DDL 采集：非加/删列的 DDL（ADD INDEX / ADD CONSTRAINT）不得被误识别为字段变更，
+     * 也不得中断 streamRead；DDL 之后的 DML 必须继续被采集。
+     */
+    @Test
+    @UnderTest(value = "streamRead", requiresVerifier = true)
+    void should_stream_read_continue_after_index_and_constraint_ddl() throws Throwable {
+        StreamReadFunction streamRead = require(functions()::getStreamReadFunction, "streamRead");
+        TimestampToStreamOffsetFunction ts2offset = require(functions()::getTimestampToStreamOffsetFunction, "timestampToStreamOffset");
+        createTableIfNeeded();
+        prepareStreamReadTable();
+        TapTable table = buildTapTable();
+        registerTable(table);
+        Object offset = ts2offset.timestampToStreamOffset(nodeContext(), System.currentTimeMillis());
+        assertNotNull(offset, "timestampToStreamOffset should return non-null offset");
+        List<TapEvent> ddlEvents = Collections.synchronizedList(new ArrayList<>());
+        CountDownLatch sentinelLatch = new CountDownLatch(1);
+        StreamReadConsumer consumer = StreamReadConsumer.create((events, off) -> {
+            for (TapEvent e : events) {
+                if (e instanceof TapNewFieldEvent || e instanceof TapDropFieldEvent) {
+                    ddlEvents.add(e);
+                } else if (e instanceof TapInsertRecordEvent) {
+                    sentinelLatch.countDown();
+                }
+            }
+        });
+        AtomicReference<Throwable> streamReadError = new AtomicReference<>();
+        Thread reader = new Thread(() -> {
+            try {
+                streamRead.streamRead(nodeContext(), List.of(table.getId()), offset, 100, consumer);
+            } catch (Throwable t) {
+                streamReadError.set(t);
+            }
+        }, "tap-it-stream-read-ddl");
+        reader.setDaemon(true);
+        reader.start();
+        long startDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(streamReadTimeoutSeconds());
+        while (consumer.getState() != StreamReadConsumer.STATE_STREAM_READ_STARTED
+                && streamReadError.get() == null && System.nanoTime() < startDeadline) {
+            Thread.sleep(50L);
+        }
+        assertNull(streamReadError.get(), () -> "streamRead terminated before startup: " + describeThrowable(streamReadError.get()));
+        assertEquals(StreamReadConsumer.STATE_STREAM_READ_STARTED, consumer.getState(), "streamRead did not report started state");
+        // 旁路执行非加/删列 DDL，随后写入哨兵行
+        verifier().createIndex(spec.getTableName(), "idx_it_ddl_cap", "c_int");
+        verifier().createConstraint(spec.getTableName(), "uq_it_ddl_cap", "c_int");
+        bypassInsert(generateRows(1));
+        boolean got = sentinelLatch.await(streamReadTimeoutSeconds(), TimeUnit.SECONDS);
+        assertNull(streamReadError.get(), () -> "streamRead terminated after index/constraint DDL: " + describeThrowable(streamReadError.get()));
+        assertTrue(got, "streamRead should keep consuming DML after index/constraint DDL");
+        assertTrue(ddlEvents.isEmpty(),
+                "index/constraint DDL must not be reported as new/drop field events, got: " + ddlEvents);
+    }
+
+
+    @Test
+    @UnderTest(value = "streamRead", requiresVerifier = true)
+    void should_stream_read_source_ddl_and_continue_dml() throws Throwable {
+        assumeTrue(supportsSourceDdlCapture(), "connector does not declare source DDL capture support, skip.");
+        StreamReadFunction streamRead = require(functions()::getStreamReadFunction, "streamRead");
+        TimestampToStreamOffsetFunction ts2offset = require(functions()::getTimestampToStreamOffsetFunction, "timestampToStreamOffset");
+        createTableIfNeeded();
+        prepareStreamReadTable();
+        TapTable table = buildTapTable();
+        registerTable(table);
+        Object offset = ts2offset.timestampToStreamOffset(nodeContext(), System.currentTimeMillis());
+        assertNotNull(offset, "timestampToStreamOffset should return non-null offset");
+        List<TapEvent> received = Collections.synchronizedList(new ArrayList<>());
+        CountDownLatch latch = new CountDownLatch(1);
+        StreamReadConsumer consumer = StreamReadConsumer.create((events, off) -> {
+            received.addAll(events);
+            if (hasSourceDdlAndSentinel(received)) {
+                latch.countDown();
+            }
+        });
+        AtomicReference<Throwable> streamReadError = new AtomicReference<>();
+        Thread reader = new Thread(() -> {
+            try {
+                streamRead.streamRead(nodeContext(), List.of(table.getId()), offset, 100, consumer);
+            } catch (Throwable t) {
+                streamReadError.set(t);
+            }
+        }, "tap-it-stream-read-ddl");
+        reader.setDaemon(true);
+        reader.start();
+        long startDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(streamReadTimeoutSeconds());
+        while (consumer.getState() != StreamReadConsumer.STATE_STREAM_READ_STARTED
+                && streamReadError.get() == null && System.nanoTime() < startDeadline) {
+            Thread.sleep(50L);
+        }
+        assertNull(streamReadError.get(), () -> "streamRead thread terminated before startup: " + describeThrowable(streamReadError.get()));
+        assertEquals(StreamReadConsumer.STATE_STREAM_READ_STARTED, consumer.getState(), "streamRead did not report started state");
+        // 旁路在源端执行 DDL（不经过 connector 的 newField/dropField/alterFieldName），再插入哨兵 DML 验证 DDL 后仍可继续采集
+        for (String sql : sourceDdlStatements(spec.getTableName())) {
+            verifier().executeDdl(sql);
+        }
+        bypassInsert(generateRows(1));
+        boolean done = latch.await(streamReadTimeoutSeconds() * 4, TimeUnit.SECONDS);
+        assertNull(streamReadError.get(), () -> "streamRead thread terminated with error: " + describeThrowable(streamReadError.get()));
+        assertTrue(done, "streamRead did not capture source DDL (new/rename/drop field) and sentinel insert, got: " + received);
+    }
+
+    private static boolean hasSourceDdlAndSentinel(List<TapEvent> events) {
+        List<TapEvent> snapshot;
+        synchronized (events) {
+            snapshot = new ArrayList<>(events);
+        }
+        return snapshot.stream().anyMatch(e -> e instanceof TapNewFieldEvent)
+                && snapshot.stream().anyMatch(e -> e instanceof TapAlterFieldNameEvent)
+                && snapshot.stream().anyMatch(e -> e instanceof TapDropFieldEvent)
+                && snapshot.stream().anyMatch(e -> e instanceof TapInsertRecordEvent);
     }
 
     @Test

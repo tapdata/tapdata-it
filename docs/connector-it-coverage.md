@@ -116,6 +116,7 @@ tapdata-it / tapdata-connector-it（test scope 依赖，单向依赖具体 Conne
 | `should_drop_field` | `dropField` |
 | `should_alter_field_name` | `alterFieldName` |
 | `should_alter_field_attributes` | `alterFieldAttributes` |
+| `should_stream_read_source_ddl_and_continue_dml` | `streamRead`（源端 DDL 采集：加列/改名/删列后继续 DML；子类覆写 `supportsSourceDdlCapture()` 开启，`sourceDdlStatements()` 调整方言） |
 
 ### F. 流式读取 / 增量 CDC（4）
 | 用例 | 覆盖能力 |

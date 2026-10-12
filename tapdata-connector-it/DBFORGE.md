@@ -31,6 +31,7 @@ benchmark; override it with `connector.it.dbforge.provision.timeout.seconds` or
 | Dameng | `dameng/dedicated/single` |
 | SQL Server | `sqlserver/dedicated/single` |
 | OceanBase Oracle | `oceanbase-oracle/dedicated/single` |
+| ClickHouse | `clickhouse/dedicated/single` |
 
 DB2 LUW, Oracle, and Sybase ITs keep their JSON source because the deployed DBForge capability
 set has no matching `db_type`. DBForge request failures are intentional test failures and never

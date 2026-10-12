@@ -96,6 +96,14 @@ public interface ConnectorVerifier {
     boolean tableExists(String table) throws Exception;
 
     /**
+     * 直连对端数据源执行一条 DDL 语句（旁路制造源端 DDL，用于验证 Connector 的 DDL 采集能力，
+     * 不经过 Connector 的 newField/dropField/alterFieldName）。默认不支持，RDBMS 验证器覆写。
+     */
+    default void executeDdl(String sql) throws Exception {
+        throw new UnsupportedOperationException("executeDdl is not supported by " + getClass().getSimpleName());
+    }
+
+    /**
      * 直连对端数据源删表（旁路清理，不经过 Connector 的 dropTable）。
      */
     void dropTable(String table) throws Exception;
