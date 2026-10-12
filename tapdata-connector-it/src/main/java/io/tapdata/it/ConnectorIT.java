@@ -339,6 +339,11 @@ public abstract class ConnectorIT {
         return ts2offset.timestampToStreamOffset(nodeContext(), System.currentTimeMillis());
     }
 
+    /** 子类可覆写：非加/删列 DDL 回归用例创建 UNIQUE 约束时使用的列。 */
+    protected String sourceDdlConstraintColumn() {
+        return primaryKeyName();
+    }
+
     protected boolean sourceDdlRenameEventExpected() {
         return true;
     }
@@ -1943,9 +1948,10 @@ public abstract class ConnectorIT {
         // table name so a previous or concurrent IT run cannot collide here.
         String ddlObjectSuffix = spec.getTableName();
         verifier().createIndex(spec.getTableName(), "idx_it_ddl_cap_" + ddlObjectSuffix, "c_int");
-        // Use the non-null primary key for the UNIQUE constraint so databases that
-        // reject nullable unique-key columns (for example DB2) can run this case.
-        verifier().createConstraint(spec.getTableName(), "uq_it_ddl_cap_" + ddlObjectSuffix, primaryKeyName());
+        // Use a non-null unique-key column by default for databases that reject
+        // nullable unique-key columns (for example DB2); dialects can override it
+        // when a UNIQUE constraint on the primary key itself is invalid.
+        verifier().createConstraint(spec.getTableName(), "uq_it_ddl_cap_" + ddlObjectSuffix, sourceDdlConstraintColumn());
         bypassInsert(generateRows(1));
         boolean got = sentinelLatch.await(streamReadTimeoutSeconds(), TimeUnit.SECONDS);
         assertNull(streamReadError.get(), () -> "streamRead terminated after index/constraint DDL: " + describeThrowable(streamReadError.get()));
