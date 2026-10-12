@@ -5,3 +5,5 @@
 *.iws
 *.iml
 *.ipr
+__pycache__/
+*.py[cod]

@@ -1,0 +1,28 @@
+name: IT Selection Regression
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/connector-it-reusable.yml'
+      - '.github/workflows/it-selection-regression.yml'
+      - 'tests/ci/**'
+      - '.github/actions/maven-retry/**'
+      - 'deploy/k3s/runner-it/**'
+  push:
+    paths:
+      - '.github/workflows/connector-it-reusable.yml'
+      - '.github/workflows/it-selection-regression.yml'
+      - 'tests/ci/**'
+      - '.github/actions/maven-retry/**'
+      - 'deploy/k3s/runner-it/**'
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: kubectl kustomize deploy/k3s/runner-it > /dev/null
+      - run: python3 -m unittest discover -s tests/ci -p 'test_*.py'

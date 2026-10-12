@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: runner-git-askpass
+  namespace: tapdata-it
+data:
+  runner-git-askpass: |
+    #!/bin/sh
+    # Never print credentials for another host; Git prompts contain the URL.
+    case "${1:-}" in
+      "Username for 'https://github.com'"*|"Username for 'https://github.com/"*)
+        printf '%s\n' x-access-token ;;
+      "Password for 'https://x-access-token@github.com'"*|"Password for 'https://x-access-token@github.com/"*)
+        test -n "${GITHUB_TOKEN:-}" && printf '%s\n' "$GITHUB_TOKEN" ;;
+      *) exit 1 ;;
+    esac

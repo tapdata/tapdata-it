@@ -1,0 +1,451 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runner-it-1
+  namespace: tapdata-it
+  labels:
+    app.kubernetes.io/name: runner-it
+    app.kubernetes.io/instance: runner-it-1
+    app.kubernetes.io/component: github-runner
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: runner-it
+      app.kubernetes.io/instance: runner-it-1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: runner-it
+        app.kubernetes.io/instance: runner-it-1
+        app.kubernetes.io/component: github-runner
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: tapserver193
+      terminationGracePeriodSeconds: 60
+      hostAliases:
+        - ip: 192.168.1.184
+          hostnames:
+            - fileserver.tapdata.net
+            - nexus.tapdata.net
+        - ip: 192.168.1.170
+          hostnames:
+            - buildserver.tapdata.io
+      containers:
+        - name: runner
+          image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          envFrom:
+            - secretRef:
+                name: runner-it-auth
+          env:
+            - name: RUN_AS_ROOT
+              value: "true"
+            - name: RUNNER_SCOPE
+              value: org
+            - name: RANDOM_RUNNER_SUFFIX
+              value: "true"
+            - name: RUNNER_GROUP
+              value: tapdata-it-runners
+            - name: ORG_NAME
+              value: tapdata
+            - name: LABELS
+              value: tapdata-it
+            - name: RUNNER_NAME_PREFIX
+              value: tapdata-it-k3s-1
+            - name: DISABLE_AUTO_UPDATE
+              value: "1"
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+            - name: runner-work
+              mountPath: /_work
+            - name: maven-cache
+              mountPath: /root/.m2
+            - name: runner-ssh-key
+              mountPath: /root/.ssh/root_id_ed25519_proxy_server_key
+              subPath: root_id_ed25519_proxy_server_key
+              readOnly: true
+            - name: runner-ssh-config
+              mountPath: /root/.ssh/config
+              subPath: config
+              readOnly: true
+            - name: java-truststore
+              mountPath: /usr/java/jdk-17.0.12/lib/security/cacerts
+              subPath: cacerts
+              readOnly: true
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /run/podman/podman.sock
+            type: Socket
+        - name: runner-work
+          hostPath:
+            path: /home/k3s-data/runner-it/runner-1/work
+            type: DirectoryOrCreate
+        - name: maven-cache
+          persistentVolumeClaim:
+            claimName: runner-maven-cache
+        - name: runner-ssh-key
+          secret:
+            secretName: runner-it-ssh
+            defaultMode: 0400
+        - name: runner-ssh-config
+          secret:
+            secretName: runner-it-ssh
+            defaultMode: 0400
+        - name: java-truststore
+          secret:
+            secretName: runner-it-truststore
+            defaultMode: 0444
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runner-it-2
+  namespace: tapdata-it
+  labels:
+    app.kubernetes.io/name: runner-it
+    app.kubernetes.io/instance: runner-it-2
+    app.kubernetes.io/component: github-runner
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: runner-it
+      app.kubernetes.io/instance: runner-it-2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: runner-it
+        app.kubernetes.io/instance: runner-it-2
+        app.kubernetes.io/component: github-runner
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: tapserver193
+      terminationGracePeriodSeconds: 60
+      hostAliases:
+        - ip: 192.168.1.184
+          hostnames:
+            - fileserver.tapdata.net
+            - nexus.tapdata.net
+        - ip: 192.168.1.170
+          hostnames:
+            - buildserver.tapdata.io
+      containers:
+        - name: runner
+          image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          envFrom:
+            - secretRef:
+                name: runner-it-auth
+          env:
+            - name: RUN_AS_ROOT
+              value: "true"
+            - name: RUNNER_SCOPE
+              value: org
+            - name: RANDOM_RUNNER_SUFFIX
+              value: "true"
+            - name: RUNNER_GROUP
+              value: tapdata-it-runners
+            - name: ORG_NAME
+              value: tapdata
+            - name: LABELS
+              value: tapdata-it
+            - name: RUNNER_NAME_PREFIX
+              value: tapdata-it-k3s-2
+            - name: DISABLE_AUTO_UPDATE
+              value: "1"
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+            - name: runner-work
+              mountPath: /_work
+            - name: maven-cache
+              mountPath: /root/.m2
+            - name: runner-ssh-key
+              mountPath: /root/.ssh/root_id_ed25519_proxy_server_key
+              subPath: root_id_ed25519_proxy_server_key
+              readOnly: true
+            - name: runner-ssh-config
+              mountPath: /root/.ssh/config
+              subPath: config
+              readOnly: true
+            - name: java-truststore
+              mountPath: /usr/java/jdk-17.0.12/lib/security/cacerts
+              subPath: cacerts
+              readOnly: true
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /run/podman/podman.sock
+            type: Socket
+        - name: runner-work
+          hostPath:
+            path: /home/k3s-data/runner-it/runner-2/work
+            type: DirectoryOrCreate
+        - name: maven-cache
+          persistentVolumeClaim:
+            claimName: runner-maven-cache
+        - name: runner-ssh-key
+          secret:
+            secretName: runner-it-ssh
+            defaultMode: 0400
+        - name: runner-ssh-config
+          secret:
+            secretName: runner-it-ssh
+            defaultMode: 0400
+        - name: java-truststore
+          secret:
+            secretName: runner-it-truststore
+            defaultMode: 0444
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runner-it-3
+  namespace: tapdata-it
+  labels:
+    app.kubernetes.io/name: runner-it
+    app.kubernetes.io/instance: runner-it-3
+    app.kubernetes.io/component: github-runner
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: runner-it
+      app.kubernetes.io/instance: runner-it-3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: runner-it
+        app.kubernetes.io/instance: runner-it-3
+        app.kubernetes.io/component: github-runner
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: tapserver193
+      terminationGracePeriodSeconds: 60
+      hostAliases:
+        - ip: 192.168.1.184
+          hostnames:
+            - fileserver.tapdata.net
+            - nexus.tapdata.net
+        - ip: 192.168.1.170
+          hostnames:
+            - buildserver.tapdata.io
+      containers:
+        - name: runner
+          image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          envFrom:
+            - secretRef:
+                name: runner-it-auth
+          env:
+            - name: RUN_AS_ROOT
+              value: "true"
+            - name: RUNNER_SCOPE
+              value: org
+            - name: RANDOM_RUNNER_SUFFIX
+              value: "true"
+            - name: RUNNER_GROUP
+              value: tapdata-it-runners
+            - name: ORG_NAME
+              value: tapdata
+            - name: LABELS
+              value: tapdata-it
+            - name: RUNNER_NAME_PREFIX
+              value: tapdata-it-k3s-3
+            - name: DISABLE_AUTO_UPDATE
+              value: "1"
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+            - name: runner-work
+              mountPath: /_work
+            - name: maven-cache
+              mountPath: /root/.m2
+            - name: runner-ssh-key
+              mountPath: /root/.ssh/root_id_ed25519_proxy_server_key
+              subPath: root_id_ed25519_proxy_server_key
+              readOnly: true
+            - name: runner-ssh-config
+              mountPath: /root/.ssh/config
+              subPath: config
+              readOnly: true
+            - name: java-truststore
+              mountPath: /usr/java/jdk-17.0.12/lib/security/cacerts
+              subPath: cacerts
+              readOnly: true
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /run/podman/podman.sock
+            type: Socket
+        - name: runner-work
+          hostPath:
+            path: /home/k3s-data/runner-it/runner-3/work
+            type: DirectoryOrCreate
+        - name: maven-cache
+          persistentVolumeClaim:
+            claimName: runner-maven-cache
+        - name: runner-ssh-key
+          secret:
+            secretName: runner-it-ssh
+            defaultMode: 0400
+        - name: runner-ssh-config
+          secret:
+            secretName: runner-it-ssh
+            defaultMode: 0400
+        - name: java-truststore
+          secret:
+            secretName: runner-it-truststore
+            defaultMode: 0444
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runner-it-4
+  namespace: tapdata-it
+  labels:
+    app.kubernetes.io/name: runner-it
+    app.kubernetes.io/instance: runner-it-4
+    app.kubernetes.io/component: github-runner
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: runner-it
+      app.kubernetes.io/instance: runner-it-4
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: runner-it
+        app.kubernetes.io/instance: runner-it-4
+        app.kubernetes.io/component: github-runner
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: tapserver193
+      terminationGracePeriodSeconds: 60
+      hostAliases:
+        - ip: 192.168.1.184
+          hostnames:
+            - fileserver.tapdata.net
+            - nexus.tapdata.net
+        - ip: 192.168.1.170
+          hostnames:
+            - buildserver.tapdata.io
+      containers:
+        - name: runner
+          image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          envFrom:
+            - secretRef:
+                name: runner-it-auth
+          env:
+            - name: RUN_AS_ROOT
+              value: "true"
+            - name: RUNNER_SCOPE
+              value: org
+            - name: RANDOM_RUNNER_SUFFIX
+              value: "true"
+            - name: RUNNER_GROUP
+              value: tapdata-it-runners
+            - name: ORG_NAME
+              value: tapdata
+            - name: LABELS
+              value: tapdata-it
+            - name: RUNNER_NAME_PREFIX
+              value: tapdata-it-k3s-4
+            - name: DISABLE_AUTO_UPDATE
+              value: "1"
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+            - name: runner-work
+              mountPath: /_work
+            - name: maven-cache
+              mountPath: /root/.m2
+            - name: runner-ssh-key
+              mountPath: /root/.ssh/root_id_ed25519_proxy_server_key
+              subPath: root_id_ed25519_proxy_server_key
+              readOnly: true
+            - name: runner-ssh-config
+              mountPath: /root/.ssh/config
+              subPath: config
+              readOnly: true
+            - name: java-truststore
+              mountPath: /usr/java/jdk-17.0.12/lib/security/cacerts
+              subPath: cacerts
+              readOnly: true
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /run/podman/podman.sock
+            type: Socket
+        - name: runner-work
+          hostPath:
+            path: /home/k3s-data/runner-it/runner-4/work
+            type: DirectoryOrCreate
+        - name: maven-cache
+          persistentVolumeClaim:
+            claimName: runner-maven-cache
+        - name: runner-ssh-key
+          secret:
+            secretName: runner-it-ssh
+            defaultMode: 0400
+        - name: runner-ssh-config
+          secret:
+            secretName: runner-it-ssh
+            defaultMode: 0400
+        - name: java-truststore
+          secret:
+            secretName: runner-it-truststore
+            defaultMode: 0444

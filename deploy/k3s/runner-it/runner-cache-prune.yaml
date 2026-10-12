@@ -1,0 +1,141 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: runner-cache-prune
+  namespace: tapdata-it
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: runner-cache-prune
+  namespace: tapdata-it
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: runner-cache-prune
+  namespace: tapdata-it
+subjects:
+  - kind: ServiceAccount
+    name: runner-cache-prune
+    namespace: tapdata-it
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: runner-cache-prune
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: runner-cache-prune
+  namespace: tapdata-it
+spec:
+  schedule: "17 3 * * *"
+  timeZone: Asia/Hong_Kong
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          serviceAccountName: runner-cache-prune
+          automountServiceAccountToken: true
+          nodeSelector:
+            kubernetes.io/hostname: tapserver193
+          restartPolicy: Never
+          containers:
+            - name: prune
+              image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+              imagePullPolicy: IfNotPresent
+              env:
+                # Inspect logs first, then explicitly change to "false" to enable deletion.
+                - name: DRY_RUN
+                  value: "true"
+                - name: GRACE_DAYS
+                  value: "7"
+              command:
+                - /bin/bash
+                - -ec
+                - |
+                  python3 - <<'PY'
+                  # BEGIN cache prune
+                  import json
+                  import os
+                  import re
+                  import shutil
+                  import ssl
+                  import time
+                  import urllib.request
+                  from pathlib import Path
+
+                  def live_pods():
+                      account = Path("/var/run/secrets/kubernetes.io/serviceaccount")
+                      namespace = (account / "namespace").read_text().strip()
+                      request = urllib.request.Request(
+                          "https://kubernetes.default.svc/api/v1/namespaces/" + namespace + "/pods",
+                          headers={"Authorization": "Bearer " + (account / "token").read_text().strip()})
+                      context = ssl.create_default_context(cafile=str(account / "ca.crt"))
+                      with urllib.request.urlopen(request, context=context, timeout=30) as response:
+                          data = json.load(response)
+                      return {item["metadata"]["name"] for item in data["items"]}
+
+                  def prune(root, live, now, grace, dry_run):
+                      root = Path(root)
+                      if root.is_symlink():
+                          raise ValueError("Refusing symlink cache root")
+                      if not root.exists():
+                          return []
+                      removed = []
+                      for directory in root.iterdir():
+                          if directory.is_symlink() or not directory.is_dir():
+                              continue
+                          if not re.fullmatch(r"runner-[a-z0-9][a-z0-9-]*", directory.name):
+                              continue
+                          marker = directory / ".orphaned"
+                          if marker.is_symlink():
+                              raise ValueError("Refusing symlink orphan marker")
+                          if directory.name in live:
+                              if not dry_run:
+                                  marker.unlink(missing_ok=True)
+                              continue
+                          if not marker.exists():
+                              print("New orphan:", directory.name)
+                              if not dry_run:
+                                  marker.touch(exist_ok=False)
+                              continue
+                          if now - marker.stat().st_mtime < grace:
+                              continue
+                          # A second API check immediately before removal protects active/new Pods.
+                          if directory.name in live_pods():
+                              continue
+                          print("Would prune:" if dry_run else "Pruning:", directory.name)
+                          removed.append(directory.name)
+                          if not dry_run:
+                              shutil.rmtree(directory)
+                      return removed
+
+                  if __name__ == "__main__":
+                      days = int(os.environ["GRACE_DAYS"])
+                      if days < 1:
+                          raise ValueError("GRACE_DAYS must be positive")
+                      mode = os.environ["DRY_RUN"].lower()
+                      if mode not in ("true", "false"):
+                          raise ValueError("DRY_RUN must be true or false")
+                      # Failure to list Pods aborts before any cache modifications.
+                      prune("/maven-cache/_runner-cache", live_pods(), time.time(),
+                            days * 86400, mode == "true")
+                  # END cache prune
+                  PY
+              volumeMounts:
+                - name: maven-cache
+                  mountPath: /maven-cache
+          volumes:
+            - name: maven-cache
+              persistentVolumeClaim:
+                claimName: runner-maven-cache

@@ -1,0 +1,1039 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runner-build-enterprise
+  namespace: tapdata-it
+  labels:
+    app.kubernetes.io/name: runner-build
+    app.kubernetes.io/instance: runner-build-enterprise
+    app.kubernetes.io/component: github-runner
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: runner-build
+      app.kubernetes.io/instance: runner-build-enterprise
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: runner-build
+        app.kubernetes.io/instance: runner-build-enterprise
+        app.kubernetes.io/component: github-runner
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: tapserver193
+      terminationGracePeriodSeconds: 60
+      hostAliases:
+        - ip: 192.168.1.184
+          hostnames: [fileserver.tapdata.net, nexus.tapdata.net]
+        - ip: 192.168.1.170
+          hostnames: [buildserver.tapdata.io]
+      containers:
+        - name: runner
+          image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          envFrom:
+            - secretRef:
+                name: runner-it-auth
+          env:
+            - name: RUN_AS_ROOT
+              value: "true"
+            - name: RUNNER_SCOPE
+              value: org
+            - name: ORG_NAME
+              value: tapdata
+            - name: LABELS
+              value: office-build
+            - name: REPO_URL
+              value: https://github.com/tapdata/tapdata-enterprise
+            - name: RUNNER_NAME_PREFIX
+              value: office-build-op
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /run/podman/podman.sock
+            type: Socket
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runner-cloud
+  namespace: tapdata-it
+  labels:
+    app.kubernetes.io/name: runner-cloud
+    app.kubernetes.io/instance: runner-cloud
+    app.kubernetes.io/component: github-runner
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: runner-cloud
+      app.kubernetes.io/instance: runner-cloud
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: runner-cloud
+        app.kubernetes.io/instance: runner-cloud
+        app.kubernetes.io/component: github-runner
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: tapserver193
+      terminationGracePeriodSeconds: 60
+      hostAliases:
+        - ip: 192.168.1.184
+          hostnames: [fileserver.tapdata.net, nexus.tapdata.net]
+        - ip: 192.168.1.170
+          hostnames: [buildserver.tapdata.io]
+      containers:
+        - name: runner
+          image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          envFrom:
+            - secretRef:
+                name: runner-it-auth
+          env:
+            - name: RUN_AS_ROOT
+              value: "true"
+            - name: RUNNER_SCOPE
+              value: org
+            - name: ORG_NAME
+              value: tapdata
+            - name: LABELS
+              value: cloud-runner
+            - name: REPO_URL
+              value: https://github.com/tapdata/tapdata-application
+            - name: RUNNER_NAME_PREFIX
+              value: office-scan
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /run/podman/podman.sock
+            type: Socket
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runner-scan
+  namespace: tapdata-it
+  labels:
+    app.kubernetes.io/name: runner-scan
+    app.kubernetes.io/instance: runner-scan
+    app.kubernetes.io/component: github-runner
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: runner-scan
+      app.kubernetes.io/instance: runner-scan
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: runner-scan
+        app.kubernetes.io/instance: runner-scan
+        app.kubernetes.io/component: github-runner
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: tapserver193
+      terminationGracePeriodSeconds: 60
+      hostAliases:
+        - ip: 192.168.1.184
+          hostnames: [fileserver.tapdata.net, nexus.tapdata.net]
+      containers:
+        - name: runner
+          image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          envFrom:
+            - secretRef:
+                name: runner-it-auth
+          env:
+            - name: RUN_AS_ROOT
+              value: "true"
+            - name: RUNNER_SCOPE
+              value: org
+            - name: ORG_NAME
+              value: tapdata
+            - name: LABELS
+              value: office-scan
+            - name: REPO_URL
+              value: https://github.com/tapdata/tapdata
+            - name: RUNNER_NAME_PREFIX
+              value: office-scan
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+            - name: java-truststore
+              mountPath: /usr/java/jdk-17.0.12/lib/security/cacerts
+              subPath: cacerts
+              readOnly: true
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /run/podman/podman.sock
+            type: Socket
+        - name: java-truststore
+          secret:
+            secretName: runner-it-truststore
+            defaultMode: 0444
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runner-scan-common
+  namespace: tapdata-it
+  labels:
+    app.kubernetes.io/name: runner-scan
+    app.kubernetes.io/instance: runner-scan-common
+    app.kubernetes.io/component: github-runner
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: runner-scan
+      app.kubernetes.io/instance: runner-scan-common
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: runner-scan
+        app.kubernetes.io/instance: runner-scan-common
+        app.kubernetes.io/component: github-runner
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: tapserver193
+      terminationGracePeriodSeconds: 60
+      hostAliases:
+        - ip: 192.168.1.184
+          hostnames: [fileserver.tapdata.net, nexus.tapdata.net]
+      containers:
+        - name: runner
+          image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          envFrom:
+            - secretRef:
+                name: runner-it-auth
+          env:
+            - name: RUN_AS_ROOT
+              value: "true"
+            - name: RUNNER_SCOPE
+              value: org
+            - name: ORG_NAME
+              value: tapdata
+            - name: LABELS
+              value: office-scan
+            - name: REPO_URL
+              value: https://github.com/tapdata/tapdata-application
+            - name: RUNNER_NAME_PREFIX
+              value: office-scan
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /run/podman/podman.sock
+            type: Socket
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runner-build-common-1
+  namespace: tapdata-it
+  labels:
+    app.kubernetes.io/name: runner-build-common
+    app.kubernetes.io/instance: runner-build-common-1
+    app.kubernetes.io/component: github-runner
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: runner-build-common
+      app.kubernetes.io/instance: runner-build-common-1
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: runner-build-common
+        app.kubernetes.io/instance: runner-build-common-1
+        app.kubernetes.io/component: github-runner
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: tapserver193
+      terminationGracePeriodSeconds: 60
+      hostAliases:
+        - ip: 192.168.1.184
+          hostnames: [fileserver.tapdata.net, nexus.tapdata.net]
+        - ip: 192.168.1.170
+          hostnames: [buildserver.tapdata.io]
+      containers:
+        - name: runner
+          image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          envFrom:
+            - secretRef:
+                name: runner-it-auth
+          env:
+            - name: RUN_AS_ROOT
+              value: "true"
+            - name: RUNNER_SCOPE
+              value: org
+            - name: ORG_NAME
+              value: tapdata
+            - name: LABELS
+              value: office-build
+            - name: REPO_URL
+              value: https://github.com/tapdata/tapdata-application
+            - name: RUNNER_NAME_PREFIX
+              value: office-build-op-1
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+            - name: build-source
+              mountPath: /root/build_source
+            - name: runner-work
+              mountPath: /_work
+            - name: maven-cache
+              mountPath: /root/.m2
+            - name: java-truststore
+              mountPath: /usr/java/jdk-17.0.12/lib/security/cacerts
+              subPath: cacerts
+              readOnly: true
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /run/podman/podman.sock
+            type: Socket
+        - name: build-source
+          persistentVolumeClaim:
+            claimName: runner-build-source
+        - name: runner-work
+          hostPath:
+            path: /home/k3s-data/build-runner-common/ins-1/_work
+            type: DirectoryOrCreate
+        - name: maven-cache
+          persistentVolumeClaim:
+            claimName: runner-maven-cache
+        - name: java-truststore
+          secret:
+            secretName: runner-it-truststore
+            defaultMode: 0444
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runner-build-common-2
+  namespace: tapdata-it
+  labels:
+    app.kubernetes.io/name: runner-build-common
+    app.kubernetes.io/instance: runner-build-common-2
+    app.kubernetes.io/component: github-runner
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: runner-build-common
+      app.kubernetes.io/instance: runner-build-common-2
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: runner-build-common
+        app.kubernetes.io/instance: runner-build-common-2
+        app.kubernetes.io/component: github-runner
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: tapserver193
+      terminationGracePeriodSeconds: 60
+      hostAliases:
+        - ip: 192.168.1.184
+          hostnames: [fileserver.tapdata.net, nexus.tapdata.net]
+        - ip: 192.168.1.170
+          hostnames: [buildserver.tapdata.io]
+      containers:
+        - name: runner
+          image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          envFrom:
+            - secretRef:
+                name: runner-it-auth
+          env:
+            - name: RUN_AS_ROOT
+              value: "true"
+            - name: RUNNER_SCOPE
+              value: org
+            - name: ORG_NAME
+              value: tapdata
+            - name: LABELS
+              value: office-build
+            - name: REPO_URL
+              value: https://github.com/tapdata/tapdata-application
+            - name: RUNNER_NAME_PREFIX
+              value: office-build-op-2
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+            - name: build-source
+              mountPath: /root/build_source
+            - name: runner-work
+              mountPath: /_work
+            - name: maven-cache
+              mountPath: /root/.m2
+            - name: java-truststore
+              mountPath: /usr/java/jdk-17.0.12/lib/security/cacerts
+              subPath: cacerts
+              readOnly: true
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /run/podman/podman.sock
+            type: Socket
+        - name: build-source
+          persistentVolumeClaim:
+            claimName: runner-build-source
+        - name: runner-work
+          hostPath:
+            path: /home/k3s-data/build-runner-common/ins-2/_work
+            type: DirectoryOrCreate
+        - name: maven-cache
+          persistentVolumeClaim:
+            claimName: runner-maven-cache
+        - name: java-truststore
+          secret:
+            secretName: runner-it-truststore
+            defaultMode: 0444
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runner-build-common-3
+  namespace: tapdata-it
+  labels:
+    app.kubernetes.io/name: runner-build-common
+    app.kubernetes.io/instance: runner-build-common-3
+    app.kubernetes.io/component: github-runner
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: runner-build-common
+      app.kubernetes.io/instance: runner-build-common-3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: runner-build-common
+        app.kubernetes.io/instance: runner-build-common-3
+        app.kubernetes.io/component: github-runner
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: tapserver193
+      terminationGracePeriodSeconds: 60
+      hostAliases:
+        - ip: 192.168.1.184
+          hostnames: [fileserver.tapdata.net, nexus.tapdata.net]
+        - ip: 192.168.1.170
+          hostnames: [buildserver.tapdata.io]
+      containers:
+        - name: runner
+          image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          envFrom:
+            - secretRef:
+                name: runner-it-auth
+          env:
+            - name: RUN_AS_ROOT
+              value: "true"
+            - name: RUNNER_SCOPE
+              value: org
+            - name: ORG_NAME
+              value: tapdata
+            - name: LABELS
+              value: office-build
+            - name: REPO_URL
+              value: https://github.com/tapdata/tapdata-application
+            - name: RUNNER_NAME_PREFIX
+              value: office-build-op-3
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+            - name: build-source
+              mountPath: /root/build_source
+            - name: runner-work
+              mountPath: /_work
+            - name: maven-cache
+              mountPath: /root/.m2
+            - name: java-truststore
+              mountPath: /usr/java/jdk-17.0.12/lib/security/cacerts
+              subPath: cacerts
+              readOnly: true
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /run/podman/podman.sock
+            type: Socket
+        - name: build-source
+          persistentVolumeClaim:
+            claimName: runner-build-source
+        - name: runner-work
+          hostPath:
+            path: /home/k3s-data/build-runner-common/ins-3/_work
+            type: DirectoryOrCreate
+        - name: maven-cache
+          persistentVolumeClaim:
+            claimName: runner-maven-cache
+        - name: java-truststore
+          secret:
+            secretName: runner-it-truststore
+            defaultMode: 0444
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runner-build-common-4
+  namespace: tapdata-it
+  labels:
+    app.kubernetes.io/name: runner-build-common
+    app.kubernetes.io/instance: runner-build-common-4
+    app.kubernetes.io/component: github-runner
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: runner-build-common
+      app.kubernetes.io/instance: runner-build-common-4
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: runner-build-common
+        app.kubernetes.io/instance: runner-build-common-4
+        app.kubernetes.io/component: github-runner
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: tapserver193
+      terminationGracePeriodSeconds: 60
+      hostAliases:
+        - ip: 192.168.1.184
+          hostnames: [fileserver.tapdata.net, nexus.tapdata.net]
+        - ip: 192.168.1.170
+          hostnames: [buildserver.tapdata.io]
+      containers:
+        - name: runner
+          image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          envFrom:
+            - secretRef:
+                name: runner-it-auth
+          env:
+            - name: RUN_AS_ROOT
+              value: "true"
+            - name: RUNNER_SCOPE
+              value: org
+            - name: ORG_NAME
+              value: tapdata
+            - name: LABELS
+              value: office-build
+            - name: REPO_URL
+              value: https://github.com/tapdata/tapdata-application
+            - name: RUNNER_NAME_PREFIX
+              value: office-build-op-4
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+            - name: build-source
+              mountPath: /root/build_source
+            - name: runner-work
+              mountPath: /_work
+            - name: maven-cache
+              mountPath: /root/.m2
+            - name: java-truststore
+              mountPath: /usr/java/jdk-17.0.12/lib/security/cacerts
+              subPath: cacerts
+              readOnly: true
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /run/podman/podman.sock
+            type: Socket
+        - name: build-source
+          persistentVolumeClaim:
+            claimName: runner-build-source
+        - name: runner-work
+          hostPath:
+            path: /home/k3s-data/build-runner-common/ins-4/_work
+            type: DirectoryOrCreate
+        - name: maven-cache
+          persistentVolumeClaim:
+            claimName: runner-maven-cache
+        - name: java-truststore
+          secret:
+            secretName: runner-it-truststore
+            defaultMode: 0444
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runner-build-common-5
+  namespace: tapdata-it
+  labels:
+    app.kubernetes.io/name: runner-build-common
+    app.kubernetes.io/instance: runner-build-common-5
+    app.kubernetes.io/component: github-runner
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: runner-build-common
+      app.kubernetes.io/instance: runner-build-common-5
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: runner-build-common
+        app.kubernetes.io/instance: runner-build-common-5
+        app.kubernetes.io/component: github-runner
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: tapserver193
+      terminationGracePeriodSeconds: 60
+      hostAliases:
+        - ip: 192.168.1.184
+          hostnames: [fileserver.tapdata.net, nexus.tapdata.net]
+        - ip: 192.168.1.170
+          hostnames: [buildserver.tapdata.io]
+      containers:
+        - name: runner
+          image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          envFrom:
+            - secretRef:
+                name: runner-it-auth
+          env:
+            - name: RUN_AS_ROOT
+              value: "true"
+            - name: RUNNER_SCOPE
+              value: org
+            - name: ORG_NAME
+              value: tapdata
+            - name: LABELS
+              value: office-build
+            - name: REPO_URL
+              value: https://github.com/tapdata/tapdata-application
+            - name: RUNNER_NAME_PREFIX
+              value: office-build-op-5
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+            - name: build-source
+              mountPath: /root/build_source
+            - name: runner-work
+              mountPath: /_work
+            - name: maven-cache
+              mountPath: /root/.m2
+            - name: java-truststore
+              mountPath: /usr/java/jdk-17.0.12/lib/security/cacerts
+              subPath: cacerts
+              readOnly: true
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /run/podman/podman.sock
+            type: Socket
+        - name: build-source
+          persistentVolumeClaim:
+            claimName: runner-build-source
+        - name: runner-work
+          hostPath:
+            path: /home/k3s-data/build-runner-common/ins-5/_work
+            type: DirectoryOrCreate
+        - name: maven-cache
+          persistentVolumeClaim:
+            claimName: runner-maven-cache
+        - name: java-truststore
+          secret:
+            secretName: runner-it-truststore
+            defaultMode: 0444
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runner-build-common-6
+  namespace: tapdata-it
+  labels:
+    app.kubernetes.io/name: runner-build-common
+    app.kubernetes.io/instance: runner-build-common-6
+    app.kubernetes.io/component: github-runner
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: runner-build-common
+      app.kubernetes.io/instance: runner-build-common-6
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: runner-build-common
+        app.kubernetes.io/instance: runner-build-common-6
+        app.kubernetes.io/component: github-runner
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: tapserver193
+      terminationGracePeriodSeconds: 60
+      hostAliases:
+        - ip: 192.168.1.184
+          hostnames: [fileserver.tapdata.net, nexus.tapdata.net]
+        - ip: 192.168.1.170
+          hostnames: [buildserver.tapdata.io]
+      containers:
+        - name: runner
+          image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          envFrom:
+            - secretRef:
+                name: runner-it-auth
+          env:
+            - name: RUN_AS_ROOT
+              value: "true"
+            - name: RUNNER_SCOPE
+              value: org
+            - name: ORG_NAME
+              value: tapdata
+            - name: LABELS
+              value: office-build
+            - name: REPO_URL
+              value: https://github.com/tapdata/tapdata-application
+            - name: RUNNER_NAME_PREFIX
+              value: office-build-op-6
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+            - name: build-source
+              mountPath: /root/build_source
+            - name: runner-work
+              mountPath: /_work
+            - name: maven-cache
+              mountPath: /root/.m2
+            - name: java-truststore
+              mountPath: /usr/java/jdk-17.0.12/lib/security/cacerts
+              subPath: cacerts
+              readOnly: true
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /run/podman/podman.sock
+            type: Socket
+        - name: build-source
+          persistentVolumeClaim:
+            claimName: runner-build-source
+        - name: runner-work
+          hostPath:
+            path: /home/k3s-data/build-runner-common/ins-6/_work
+            type: DirectoryOrCreate
+        - name: maven-cache
+          persistentVolumeClaim:
+            claimName: runner-maven-cache
+        - name: java-truststore
+          secret:
+            secretName: runner-it-truststore
+            defaultMode: 0444
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runner-build-common-7
+  namespace: tapdata-it
+  labels:
+    app.kubernetes.io/name: runner-build-common
+    app.kubernetes.io/instance: runner-build-common-7
+    app.kubernetes.io/component: github-runner
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: runner-build-common
+      app.kubernetes.io/instance: runner-build-common-7
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: runner-build-common
+        app.kubernetes.io/instance: runner-build-common-7
+        app.kubernetes.io/component: github-runner
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: tapserver193
+      terminationGracePeriodSeconds: 60
+      hostAliases:
+        - ip: 192.168.1.184
+          hostnames: [fileserver.tapdata.net, nexus.tapdata.net]
+        - ip: 192.168.1.170
+          hostnames: [buildserver.tapdata.io]
+      containers:
+        - name: runner
+          image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          envFrom:
+            - secretRef:
+                name: runner-it-auth
+          env:
+            - name: RUN_AS_ROOT
+              value: "true"
+            - name: RUNNER_SCOPE
+              value: org
+            - name: ORG_NAME
+              value: tapdata
+            - name: LABELS
+              value: office-build
+            - name: REPO_URL
+              value: https://github.com/tapdata/tapdata-application
+            - name: RUNNER_NAME_PREFIX
+              value: office-build-op-7
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+            - name: build-source
+              mountPath: /root/build_source
+            - name: runner-work
+              mountPath: /_work
+            - name: maven-cache
+              mountPath: /root/.m2
+            - name: java-truststore
+              mountPath: /usr/java/jdk-17.0.12/lib/security/cacerts
+              subPath: cacerts
+              readOnly: true
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /run/podman/podman.sock
+            type: Socket
+        - name: build-source
+          persistentVolumeClaim:
+            claimName: runner-build-source
+        - name: runner-work
+          hostPath:
+            path: /home/k3s-data/build-runner-common/ins-7/_work
+            type: DirectoryOrCreate
+        - name: maven-cache
+          persistentVolumeClaim:
+            claimName: runner-maven-cache
+        - name: java-truststore
+          secret:
+            secretName: runner-it-truststore
+            defaultMode: 0444
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: runner-build-common-8
+  namespace: tapdata-it
+  labels:
+    app.kubernetes.io/name: runner-build-common
+    app.kubernetes.io/instance: runner-build-common-8
+    app.kubernetes.io/component: github-runner
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: runner-build-common
+      app.kubernetes.io/instance: runner-build-common-8
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: runner-build-common
+        app.kubernetes.io/instance: runner-build-common-8
+        app.kubernetes.io/component: github-runner
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: tapserver193
+      terminationGracePeriodSeconds: 60
+      hostAliases:
+        - ip: 192.168.1.184
+          hostnames: [fileserver.tapdata.net, nexus.tapdata.net]
+        - ip: 192.168.1.170
+          hostnames: [buildserver.tapdata.io]
+      containers:
+        - name: runner
+          image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          envFrom:
+            - secretRef:
+                name: runner-it-auth
+          env:
+            - name: RUN_AS_ROOT
+              value: "true"
+            - name: RUNNER_SCOPE
+              value: org
+            - name: ORG_NAME
+              value: tapdata
+            - name: LABELS
+              value: office-build
+            - name: REPO_URL
+              value: https://github.com/tapdata/tapdata-application
+            - name: RUNNER_NAME_PREFIX
+              value: office-build-op-8
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 12Gi
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+            - name: build-source
+              mountPath: /root/build_source
+            - name: runner-work
+              mountPath: /_work
+            - name: maven-cache
+              mountPath: /root/.m2
+            - name: java-truststore
+              mountPath: /usr/java/jdk-17.0.12/lib/security/cacerts
+              subPath: cacerts
+              readOnly: true
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /run/podman/podman.sock
+            type: Socket
+        - name: build-source
+          persistentVolumeClaim:
+            claimName: runner-build-source
+        - name: runner-work
+          hostPath:
+            path: /home/k3s-data/build-runner-common/ins-8/_work
+            type: DirectoryOrCreate
+        - name: maven-cache
+          persistentVolumeClaim:
+            claimName: runner-maven-cache
+        - name: java-truststore
+          secret:
+            secretName: runner-it-truststore
+            defaultMode: 0444

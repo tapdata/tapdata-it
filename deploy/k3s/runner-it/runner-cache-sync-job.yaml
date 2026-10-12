@@ -1,0 +1,124 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: runner-cache-sync
+  namespace: tapdata-it
+  labels:
+    app.kubernetes.io/name: runner-cache-sync
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: runner-cache-sync
+    spec:
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: tapserver193
+      restartPolicy: Never
+      containers:
+        - name: sync
+          image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: GITHUB_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: runner-github-token
+                  key: GITHUB_TOKEN
+            - name: RSYNC_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: runner-rsync-auth
+                  key: RSYNC_PASSWORD
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              umask 077
+              trap 'rm -f /tmp/rsync.passwd /tmp/git-askpass' EXIT
+              mkdir -p /root/build_source/repos /root/.m2 /root/.npm /root/.pkg-cache/v3.4
+
+              printf '%s\n' "$RSYNC_PASSWORD" > /tmp/rsync.passwd
+              # Protect private runner caches even if this one-time seed job is rerun.
+              rsync -a --delete --exclude='/_runner-cache/' --password-file=/tmp/rsync.passwd \
+                rsync://root@fileserver.tapdata.net:873/data/enterprise-temp/tapdata/ /root/.m2/
+              rsync -a --delete --password-file=/tmp/rsync.passwd \
+                rsync://root@fileserver.tapdata.net:873/data/build-temp/ /root/.pkg-cache/v3.4/
+
+              if [ -d /root/build_source/repos/tapdata-enterprise ]; then
+                mkdir -p /root/build_source/repos/tapdata-enterprise/tapdata-agent/node_modules
+                mkdir -p /root/build_source/repos/tapdata-enterprise/apiserver/node_modules
+              fi
+              rsync -a --delete --password-file=/tmp/rsync.passwd \
+                rsync://root@fileserver.tapdata.net:873/data/enterprise-temp/tapdata-agent/ \
+                /root/build_source/repos/tapdata-enterprise/tapdata-agent/node_modules/ || true
+              rsync -a --delete --password-file=/tmp/rsync.passwd \
+                rsync://root@fileserver.tapdata.net:873/data/enterprise-temp/apiserver/ \
+                /root/build_source/repos/tapdata-enterprise/apiserver/node_modules/ || true
+              rm -f /tmp/rsync.passwd
+
+              cat > /tmp/git-askpass <<'ASKPASS'
+              #!/bin/sh
+              case "$1" in
+                *Username*) printf '%s\n' x-access-token ;;
+                *Password*) printf '%s\n' "${GITHUB_TOKEN:-}" ;;
+                *) exit 1 ;;
+              esac
+              ASKPASS
+              chmod 700 /tmp/git-askpass
+              export GIT_ASKPASS=/tmp/git-askpass
+              export GIT_TERMINAL_PROMPT=0
+
+              failed=""
+              for repo in tapdata-application tapdata tapdata-web docs tapdata-license tapdata-enterprise tapdata-connectors tapdata-connectors-enterprise; do
+                dst="/root/build_source/repos/$repo"
+                url="https://github.com/tapdata/$repo.git"
+                if [ -d "$dst/.git" ]; then
+                  echo "Keeping existing repository: $repo"
+                  continue
+                fi
+                if [ -e "$dst" ]; then
+                  echo "Repository path exists but is not a Git checkout: $dst"
+                  failed="$failed $repo"
+                  continue
+                fi
+                tmp="${dst}.restore.$$"
+                rm -rf "$tmp"
+                if ! git clone --depth=1 --no-tags --single-branch "$url" "$tmp"; then
+                  failed="$failed $repo"
+                  rm -rf "$tmp"
+                  continue
+                fi
+                mv "$tmp" "$dst"
+                echo "Restored repository: $repo"
+              done
+
+              echo "Cache sync completed. Maven: $(du -sh /root/.m2 | awk '{print $1}'), source: $(du -sh /root/build_source | awk '{print $1}'), pkg: $(du -sh /root/.pkg-cache | awk '{print $1}')"
+              if [ -n "$failed" ]; then
+                echo "Repositories that could not be restored:$failed"
+                exit 1
+              fi
+          volumeMounts:
+            - name: runner-build-source
+              mountPath: /root/build_source
+            - name: runner-maven-cache
+              mountPath: /root/.m2
+            - name: runner-node-cache
+              mountPath: /root/.npm
+            - name: runner-pkg-cache
+              mountPath: /root/.pkg-cache
+      volumes:
+        - name: runner-build-source
+          persistentVolumeClaim:
+            claimName: runner-build-source
+        - name: runner-maven-cache
+          persistentVolumeClaim:
+            claimName: runner-maven-cache
+        - name: runner-node-cache
+          persistentVolumeClaim:
+            claimName: runner-node-cache
+        - name: runner-pkg-cache
+          persistentVolumeClaim:
+            claimName: runner-pkg-cache
