@@ -1897,13 +1897,12 @@ public abstract class ConnectorIT {
     @UnderTest(value = "streamRead", requiresVerifier = true)
     void should_stream_read_continue_after_index_and_constraint_ddl() throws Throwable {
         StreamReadFunction streamRead = require(functions()::getStreamReadFunction, "streamRead");
-        TimestampToStreamOffsetFunction ts2offset = require(functions()::getTimestampToStreamOffsetFunction, "timestampToStreamOffset");
         createTableIfNeeded();
         prepareStreamReadTable();
         TapTable table = buildTapTable();
         registerTable(table);
-        Object offset = ts2offset.timestampToStreamOffset(nodeContext(), System.currentTimeMillis());
-        assertNotNull(offset, "timestampToStreamOffset should return non-null offset");
+        Object offset = sourceDdlStreamOffset();
+        assertNotNull(offset, "streamRead startup offset should be non-null");
         List<TapEvent> ddlEvents = Collections.synchronizedList(new ArrayList<>());
         CountDownLatch sentinelLatch = new CountDownLatch(1);
         StreamReadConsumer consumer = StreamReadConsumer.create((events, off) -> {
@@ -1925,19 +1924,28 @@ public abstract class ConnectorIT {
         }, "tap-it-stream-read-ddl");
         reader.setDaemon(true);
         reader.start();
-        long startDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(streamReadTimeoutSeconds());
-        while (consumer.getState() != StreamReadConsumer.STATE_STREAM_READ_STARTED
-                && streamReadError.get() == null && System.nanoTime() < startDeadline) {
-            Thread.sleep(50L);
+        if (sourceDdlReportsStartedState()) {
+            long startDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(sourceDdlStartupTimeoutSeconds());
+            while (consumer.getState() != StreamReadConsumer.STATE_STREAM_READ_STARTED
+                    && streamReadError.get() == null && System.nanoTime() < startDeadline) {
+                Thread.sleep(50L);
+            }
+            assertEquals(StreamReadConsumer.STATE_STREAM_READ_STARTED, consumer.getState(), "streamRead did not report started state");
+        } else {
+            // Some connectors (including DB2 native CDC) neither expose a started
+            // state nor emit an idle heartbeat. Let the reader enter its poll loop;
+            // the sentinel DML below verifies that it is consuming after the DDL.
+            Thread.sleep(2_000L);
         }
         assertNull(streamReadError.get(), () -> "streamRead terminated before startup: " + describeThrowable(streamReadError.get()));
-        assertEquals(StreamReadConsumer.STATE_STREAM_READ_STARTED, consumer.getState(), "streamRead did not report started state");
         // 旁路执行非加/删列 DDL，随后写入哨兵行
         // SQL Server enforces constraint names at schema scope. Include the per-run
         // table name so a previous or concurrent IT run cannot collide here.
         String ddlObjectSuffix = spec.getTableName();
         verifier().createIndex(spec.getTableName(), "idx_it_ddl_cap_" + ddlObjectSuffix, "c_int");
-        verifier().createConstraint(spec.getTableName(), "uq_it_ddl_cap_" + ddlObjectSuffix, "c_int");
+        // Use the non-null primary key for the UNIQUE constraint so databases that
+        // reject nullable unique-key columns (for example DB2) can run this case.
+        verifier().createConstraint(spec.getTableName(), "uq_it_ddl_cap_" + ddlObjectSuffix, primaryKeyName());
         bypassInsert(generateRows(1));
         boolean got = sentinelLatch.await(streamReadTimeoutSeconds(), TimeUnit.SECONDS);
         assertNull(streamReadError.get(), () -> "streamRead terminated after index/constraint DDL: " + describeThrowable(streamReadError.get()));
