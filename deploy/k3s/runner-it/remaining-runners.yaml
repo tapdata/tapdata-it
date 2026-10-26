@@ -165,6 +165,14 @@ spec:
       hostAliases:
         - ip: 192.168.1.184
           hostnames: [fileserver.tapdata.net, nexus.tapdata.net]
+      initContainers:
+        - name: mask-image-gitee-key
+          image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-ec", "umask 077; : > /ssh/id_rsa"]
+          volumeMounts:
+            - name: gitee-ssh-key
+              mountPath: /ssh
       containers:
         - name: runner
           image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
@@ -197,6 +205,10 @@ spec:
           volumeMounts:
             - name: docker-sock
               mountPath: /var/run/docker.sock
+            - name: gitee-ssh-key
+              mountPath: /root/.ssh/id_rsa
+              subPath: id_rsa
+              readOnly: true
             - name: java-truststore
               mountPath: /usr/java/jdk-17.0.12/lib/security/cacerts
               subPath: cacerts
@@ -210,6 +222,8 @@ spec:
           secret:
             secretName: runner-it-truststore
             defaultMode: 0444
+        - name: gitee-ssh-key
+          emptyDir: {}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -240,6 +254,14 @@ spec:
       hostAliases:
         - ip: 192.168.1.184
           hostnames: [fileserver.tapdata.net, nexus.tapdata.net]
+      initContainers:
+        - name: mask-image-gitee-key
+          image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-ec", "umask 077; : > /ssh/id_rsa"]
+          volumeMounts:
+            - name: gitee-ssh-key
+              mountPath: /ssh
       containers:
         - name: runner
           image: harbor.internal.tapdata.io/tapdata/github-action-runner:5.12
@@ -272,11 +294,17 @@ spec:
           volumeMounts:
             - name: docker-sock
               mountPath: /var/run/docker.sock
+            - name: gitee-ssh-key
+              mountPath: /root/.ssh/id_rsa
+              subPath: id_rsa
+              readOnly: true
       volumes:
         - name: docker-sock
           hostPath:
             path: /run/podman/podman.sock
             type: Socket
+        - name: gitee-ssh-key
+          emptyDir: {}
 ---
 apiVersion: apps/v1
 kind: Deployment

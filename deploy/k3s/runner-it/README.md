@@ -87,6 +87,15 @@ runner termination can bypass cleanup; runner temp cleanup on the next job
 must still be retained. Merge both workflow and retry-action changes into
 `tapdata-it/main` together, since reusable action references use `@main`.
 
+## Office scan Gitee SSH credentials
+
+The `runner-scan` and `runner-scan-common` Deployments mask the runner image's
+legacy `/root/.ssh/id_rsa` with a read-only empty file. Workflows that need Gitee
+SSH must use their own repository's `GITEE_SSH_KEY` and `GITEE_KNOWN_HOSTS`
+Secrets in a job-scoped temporary directory, then remove that directory at job
+completion. Do not bake or mount a Gitee private key into these shared runners;
+otherwise jobs can inherit an identity from an earlier run.
+
 The following runtime Secrets are intentionally not stored in Git:
 
 - `runner-it-auth`: GitHub organization runner registration credentials.
