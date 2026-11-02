@@ -77,55 +77,60 @@ public class TmCreateDatasourceAction extends BaseStep {
 
     @Override
     protected StepResult doExecute(StepConfig config, ScenarioContext ctx) throws Exception {
-        Map<String, Object> inputs = config.getInputs();
+        TmCreateDatasourceParameter p = config.getInputParameterConfig(TmCreateDatasourceParameter.class);
 
-        String name = required(inputs, "name");
-        String databaseType = required(inputs, "database_type");
-        String connectionType = (String) inputs.getOrDefault("connection_type", "source_and_target");
-        String databaseHost = required(inputs, "database_host");
-        int databasePort = Integer.parseInt(required(inputs, "database_port"));
-        String databaseUsername = required(inputs, "database_username");
-        String databasePassword = (String) inputs.get("database_password");
-        String databaseName = (String) inputs.get("database_name");
-        String pdkHash = (String) inputs.get("pdk_hash"); // optional, auto-resolve if missing
-        Object rawConfig = inputs.get("config"); // optional extra PDK config
+        // 必填校验
+        if (p.getName() == null || p.getName().isBlank()) {
+            throw new IllegalArgumentException("Required input missing: name");
+        }
+        if (p.getDatabaseType() == null || p.getDatabaseType().isBlank()) {
+            throw new IllegalArgumentException("Required input missing: database_type");
+        }
+        if (p.getDatabaseHost() == null || p.getDatabaseHost().isBlank()) {
+            throw new IllegalArgumentException("Required input missing: database_host");
+        }
+        if (p.getDatabaseUsername() == null || p.getDatabaseUsername().isBlank()) {
+            throw new IllegalArgumentException("Required input missing: database_username");
+        }
 
         // Auto-resolve pdkHash from DatabaseTypes API
+        String pdkHash = p.getPdkHash();
         if (pdkHash == null || pdkHash.isBlank()) {
-            pdkHash = resolvePdkHash(databaseType);
-            log.info("[TM] Auto-resolved pdkHash for {} → {}", databaseType, pdkHash);
+            pdkHash = resolvePdkHash(p.getDatabaseType());
+            log.info("[TM] Auto-resolved pdkHash for {} → {}", p.getDatabaseType(), pdkHash);
         }
+
+        String connectionType = p.getConnectionType();
 
         // Build flat request body (matches DataSourceConnectionDto)
         Map<String, Object> body = new HashMap<>();
-        body.put("name", name);
-        body.put("database_type", databaseType);
+        body.put("name", p.getName());
+        body.put("database_type", p.getDatabaseType());
         body.put("pdkHash", pdkHash);
         body.put("connection_type", connectionType);
-        body.put("database_host", databaseHost);
-        body.put("database_port", databasePort);
-        body.put("database_username", databaseUsername);
-        body.put("database_password", databasePassword);
-        body.put("database_name", databaseName);
+        body.put("database_host", p.getDatabaseHost());
+        body.put("database_port", p.getDatabasePort());
+        body.put("database_username", p.getDatabaseUsername());
+        body.put("database_password", p.getDatabasePassword());
+        body.put("database_name", p.getDatabaseName());
 
         // Build PDK config JSON (nested)
         Map<String, Object> pdkConfig = new LinkedHashMap<>();
         pdkConfig.put("__connectionType", connectionType);
-        pdkConfig.put("host", databaseHost);
-        pdkConfig.put("port", databasePort);
-        pdkConfig.put("username", databaseUsername);
-        pdkConfig.put("password", databasePassword);
-        if (databaseName != null) pdkConfig.put("database", databaseName);
+        pdkConfig.put("host", p.getDatabaseHost());
+        pdkConfig.put("port", p.getDatabasePort());
+        pdkConfig.put("username", p.getDatabaseUsername());
+        pdkConfig.put("password", p.getDatabasePassword());
+        if (p.getDatabaseName() != null) pdkConfig.put("database", p.getDatabaseName());
 
         // Merge caller-provided config overrides
-        if (rawConfig instanceof Map) {
-            @SuppressWarnings("unchecked")
-            Map<String, Object> extras = (Map<String, Object>) rawConfig;
-            pdkConfig.putAll(extras);
+        Map<String, Object> rawConfig = p.getConfig();
+        if (rawConfig != null) {
+            pdkConfig.putAll(rawConfig);
         }
         body.put("config", pdkConfig);
 
-        log.info("[TM] Creating Connection '{}' (type={}, pdkHash={})", name, databaseType, pdkHash);
+        log.info("[TM] Creating Connection '{}' (type={}, pdkHash={})", p.getName(), p.getDatabaseType(), pdkHash);
         JsonNode resp = client.post("/api/Connections", body);
 
         String connectionId = text(resp, "id");
@@ -170,13 +175,5 @@ public class TmCreateDatasourceAction extends BaseStep {
 
     private static String text(JsonNode n, String key) {
         return n.has(key) && !n.get(key).isNull() ? n.get(key).asText() : null;
-    }
-
-    private static String required(Map<String, Object> inputs, String key) {
-        Object v = inputs.get(key);
-        if (v == null || v.toString().isBlank()) {
-            throw new IllegalArgumentException("Required input missing: " + key);
-        }
-        return v.toString();
     }
 }

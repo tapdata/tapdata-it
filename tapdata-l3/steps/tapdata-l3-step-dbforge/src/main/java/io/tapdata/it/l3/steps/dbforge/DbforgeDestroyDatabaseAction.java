@@ -44,13 +44,12 @@ public class DbforgeDestroyDatabaseAction extends BaseStep {
 
     @Override
     protected StepResult doExecute(StepConfig config, ScenarioContext ctx) throws Exception {
-        Map<String, Object> inputs = config.getInputs();
-        String leaseId = (String) inputs.get("lease_id");
-        if (leaseId == null || leaseId.isBlank()) {
+        DbforgeDestroyDatabaseParameter p = config.getInputParameterConfig(DbforgeDestroyDatabaseParameter.class);
+        if (p.getLeaseId() == null || p.getLeaseId().isBlank()) {
             throw new IllegalArgumentException("Required input 'lease_id' is missing");
         }
-        log.info("[DBForge] Manual destroy lease {}", leaseId);
-        client.destroyLease(leaseId);
+        log.info("[DBForge] Manual destroy lease {}", p.getLeaseId());
+        client.destroyLease(p.getLeaseId());
         return success();
     }
 }

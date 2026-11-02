@@ -80,22 +80,20 @@ public class AssertJdbcDataAction extends BaseStep {
 
     @Override
     protected StepResult doExecute(StepConfig config, ScenarioContext ctx) throws Exception {
-        Map<String, Object> inputs = config.getInputs();
+        AssertJdbcDataParameter p = config.getInputParameterConfig(AssertJdbcDataParameter.class);
 
-        String jdbcUrl = required(inputs, "jdbc_url");
-        // username/password 可选（SQLite、本地文件数据库不需要认证）
-        String username = (String) inputs.get("username");
-        String password = (String) inputs.get("password");
-        String sql = required(inputs, "sql");
-        String sqlType = (String) inputs.getOrDefault("sql_type", "auto"); // auto | query | execute
-        String assertMode = (String) inputs.get("assert_mode"); // assert mode (optional if sql_type=execute)
-        String driverClass = (String) inputs.get("driver_class"); // auto-detect if missing
-        int pollIntervalSec = parseInt(inputs.get("poll_interval"), 0);
-        int maxAttempts = parseInt(inputs.get("max_attempts"), 1);
+        // 业务必填校验
+        if (p.getJdbcUrl() == null || p.getJdbcUrl().isBlank()) {
+            throw new IllegalArgumentException("Required input missing: jdbc_url");
+        }
+        if (p.getSql() == null || p.getSql().isBlank()) {
+            throw new IllegalArgumentException("Required input missing: sql");
+        }
 
         // Resolve driver
+        String driverClass = p.getDriverClass();
         if (driverClass == null || driverClass.isBlank()) {
-            driverClass = detectDriver(jdbcUrl);
+            driverClass = detectDriver(p.getJdbcUrl());
         }
         if (driverClass != null && !driverClass.isBlank()) {
             try {
@@ -113,8 +111,9 @@ public class AssertJdbcDataAction extends BaseStep {
         }
 
         // 判断 SQL 类型
+        String sqlType = p.getSqlType();
         if ("auto".equals(sqlType)) {
-            String trimmed = sql.trim().toLowerCase();
+            String trimmed = p.getSql().trim().toLowerCase();
             if (trimmed.startsWith("select") || trimmed.startsWith("show") || trimmed.startsWith("with")
                     || trimmed.startsWith("pragma") || trimmed.startsWith("values")) {
                 sqlType = "query";
@@ -123,17 +122,12 @@ public class AssertJdbcDataAction extends BaseStep {
             }
         }
 
-        Object expectedValue = inputs.get("expected");
-        Integer expectedCount = parseInt(inputs.get("expected_count"), -1);
-        Integer expectedMin = parseInt(inputs.get("expected_min"), -1);
-        String column = (String) inputs.get("column");
-
         long t0 = System.currentTimeMillis();
 
         if ("execute".equals(sqlType)) {
             // === DDL / DML 执行模式（无 assertion）===
-            log.info("[AssertJDBC] EXECUTE: sql='{}'", truncate(sql, 120));
-            int updated = executeUpdate(jdbcUrl, username, password, sql);
+            log.info("[AssertJDBC] EXECUTE: sql='{}'", truncate(p.getSql(), 120));
+            int updated = executeUpdate(p.getJdbcUrl(), p.getUsername(), p.getPassword(), p.getSql());
             long elapsedMs = System.currentTimeMillis() - t0;
             log.info("[AssertJDBC] EXECUTE done: {} row(s) affected ({}ms)", updated, elapsedMs);
             Map<String, Object> outputs = new LinkedHashMap<>();
@@ -143,17 +137,25 @@ public class AssertJdbcDataAction extends BaseStep {
         }
 
         // === Query + Assert 模式 ===
+        String assertMode = p.getAssertMode();
         if (assertMode == null || assertMode.isBlank()) {
             throw new IllegalArgumentException("assert_mode is required for SELECT queries (row_count_equals / exists / value_equals / ...)");
         }
 
-        log.info("[AssertJDBC] {}: sql='{}' [{}]", assertMode, truncate(sql, 120),
+        int pollIntervalSec = p.getPollInterval();
+        int maxAttempts = p.getMaxAttempts();
+        Integer expectedCount = p.getExpectedCount();
+        Integer expectedMin = p.getExpectedMin();
+        Object expectedValue = p.getExpected();
+        String column = p.getColumn();
+
+        log.info("[AssertJDBC] {}: sql='{}' [{}]", assertMode, truncate(p.getSql(), 120),
                 pollIntervalSec > 0 ? String.format("poll %ds × %d attempts", pollIntervalSec, maxAttempts) : "single attempt");
 
         Throwable lastFailure = null;
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
-                List<Map<String, Object>> rows = executeQuery(jdbcUrl, username, password, sql);
+                List<Map<String, Object>> rows = executeQuery(p.getJdbcUrl(), p.getUsername(), p.getPassword(), p.getSql());
                 evaluateAssertion(assertMode, rows, expectedCount, expectedMin, expectedValue, column);
 
                 long elapsedMs = System.currentTimeMillis() - t0;
@@ -310,17 +312,5 @@ public class AssertJdbcDataAction extends BaseStep {
 
     private static String truncate(String s, int max) {
         return s.length() > max ? s.substring(0, max) + "..." : s;
-    }
-
-    private static int parseInt(Object v, int def) {
-        try { return Integer.parseInt(String.valueOf(v)); } catch (Exception e) { return def; }
-    }
-
-    private static String required(Map<String, Object> inputs, String key) {
-        Object v = inputs.get(key);
-        if (v == null || v.toString().isBlank()) {
-            throw new IllegalArgumentException("Required input missing: " + key);
-        }
-        return v.toString();
     }
 }

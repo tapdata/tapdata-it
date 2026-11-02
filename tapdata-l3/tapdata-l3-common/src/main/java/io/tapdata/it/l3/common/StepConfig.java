@@ -1,5 +1,8 @@
 package io.tapdata.it.l3.common;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
@@ -7,6 +10,7 @@ import lombok.NoArgsConstructor;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * DSL Step config — the in-memory representation of a YAML step block.
@@ -23,6 +27,18 @@ import java.util.Map;
 @NoArgsConstructor
 @AllArgsConstructor
 public class StepConfig {
+
+    /** Jackson ObjectMapper — snake_case ↔ camelCase 自动映射，忽略未知字段。 */
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+            .setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE);
+
+    /**
+     * ParameterConfig 实例缓存 — Class → 已解析好的参数对象。
+     * 同一个 StepConfig 生命周期内，对同一 Class 的多次 getInputParameterConfig 调用返回同一个实例。
+     * 标记为 transient 避免 YAML 序列化。
+     */
+    private transient Map<Class<? extends ParameterConfig>, ParameterConfig> parameterConfigCache;
 
     /** Unique step id within a scenario. Used for cross-step output references. */
     private String id;
@@ -48,12 +64,9 @@ public class StepConfig {
     private Map<String, Object> hooks;
 
     /**
-     * User-specified extra Maven dependencies — resolved + loaded into the step's classloader.
-     * Coordinate format: {@code groupId:artifactId:version}.
-     * Example: {@code ["com.mysql:mysql-connector-j:8.3.0", "org.mongodb:mongodb-jdbc:2.1.0"]}.
-     * <p>
-     * These are <b>merged</b> with what the step's {@code ActionHandler.getRuntimeDependencies()}
-     * declares — both sources contribute to the final dependency set.
+     * DSL 里声明的 extra_deps —— 额外 Maven 依赖坐标列表（{@code groupId:artifactId:version}）。
+     * 运行时由 PluginCenter 解析下载后注入到 step 专属 URLClassLoader。
+     * 这是动态加载 JDBC 驱动等运行时依赖的核心机制。
      */
     private List<String> extraDeps;
 
@@ -62,18 +75,6 @@ public class StepConfig {
      * <p>
      * 优先级：StepConfig.use > CLI 内置默认注册表 (steps-registry.yaml) > 内置 step (fat jar 里的 @Component)。
      * 当 action 在 registry 或 fat jar 里找不到时，PluginCenter 会根据这个坐标从 Maven 仓库下载 jar + 传递依赖。
-     * <p>
-     * 典型用法：
-     * <pre>
-     * # 强制使用某个版本（覆盖默认注册表）
-     * - id: create_db
-     *   action: dbforge_create_database
-     *   use: "io.tapdata.it.l3:tapdata-l3-step-dbforge:1.1.0"   # 显式 1.1.0
-     *
-     * # 不写 use — 走默认注册表 → 1.0.0-SNAPSHOT
-     * - id: create_db
-     *   action: dbforge_create_database
-     * </pre>
      */
     private String use;
 
@@ -85,4 +86,76 @@ public class StepConfig {
      * 仅在运行时（StepRunner → BaseStep → AssertJdbcDataAction）链路中传递。
      */
     private transient ClassLoader stepClassLoader;
+
+    // ==================== ParameterConfig 便捷方法 ====================
+
+    /**
+     * 将 {@code inputs} Map 自动转换到 Step 专属 ParameterConfig 对象。
+     * <p>
+     * 核心价值：Step 内部可以用类型安全的 bean 代替繁琐的
+     * {@code config.getInputs().get("jdbc_url")} + 类型强转 + required helper。
+     *
+     * <h4>转换规则</h4>
+     * <ul>
+     *   <li>YAML snake_case → Java camelCase 自动映射（jackson-databind SNAKE_CASE 策略）</li>
+     *   <li>参数对象上 {@code stepId}、{@code action}、{@code timeoutSeconds} 三个通用字段由本方法自动填充</li>
+     *   <li>未知字段忽略（FAIL_ON_UNKNOWN_PROPERTIES = false）—— YAML 里多写的参数不会报错</li>
+     *   <li>缺少必填字段不会自动校验，由 Step 子类自己在 doExecute 里按需检查</li>
+     * </ul>
+     *
+     * <h4>缓存语义</h4>
+     * <p>同一个 StepConfig 实例内，对同一个 {@code parameterClass} 的多次调用返回**同一个对象**。
+     * 如果 inputs 被 SpEL 二次求值后更新了（比如输出引用从 null 变成实际值），需要调 {@link #clearParameterConfigCache()} 重新解析。
+     *
+     * @param parameterClass Step 专属的 ParameterConfig 子类（必须有无参构造器 + Lombok @Data）
+     * @return 已填充好字段的参数对象
+     * @throws IllegalArgumentException 当 inputs 解析失败或 parameterClass 不是 ParameterConfig 子类时抛出
+     */
+    @SuppressWarnings("unchecked")
+    public <T extends ParameterConfig> T getInputParameterConfig(Class<T> parameterClass) {
+        if (parameterClass == null || !ParameterConfig.class.isAssignableFrom(parameterClass)) {
+            throw new IllegalArgumentException(
+                    parameterClass + " must be a subclass of ParameterConfig");
+        }
+
+        // 懒初始化缓存（StepConfig 是 @Builder，cache 初始为 null）
+        if (parameterConfigCache == null) {
+            parameterConfigCache = new ConcurrentHashMap<>();
+        }
+
+        ParameterConfig cached = parameterConfigCache.get(parameterClass);
+        if (cached != null) {
+            return (T) cached;
+        }
+
+        try {
+            T instance;
+            if (inputs == null || inputs.isEmpty()) {
+                // 没有 inputs → 反射无参构造器创建实例
+                instance = parameterClass.getDeclaredConstructor().newInstance();
+            } else {
+                instance = OBJECT_MAPPER.convertValue(inputs, parameterClass);
+            }
+
+            // 填充基类通用字段
+            instance.setStepId(id);
+            instance.setAction(action);
+            if (timeoutSeconds > 0) {
+                instance.setTimeoutSeconds(timeoutSeconds);
+            }
+
+            parameterConfigCache.put(parameterClass, instance);
+            return instance;
+        } catch (Exception e) {
+            throw new IllegalArgumentException(
+                    "Failed to convert inputs to " + parameterClass.getSimpleName() + ": " + e.getMessage(), e);
+        }
+    }
+
+    /** 清除 parameterConfig 缓存 —— inputs 被 SpEL 二次求值后需要重新解析时调用。 */
+    public void clearParameterConfigCache() {
+        if (parameterConfigCache != null) {
+            parameterConfigCache.clear();
+        }
+    }
 }

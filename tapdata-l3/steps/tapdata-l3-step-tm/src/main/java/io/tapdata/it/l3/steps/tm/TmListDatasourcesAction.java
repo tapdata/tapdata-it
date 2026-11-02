@@ -48,19 +48,17 @@ public class TmListDatasourcesAction extends BaseStep {
 
     @Override
     protected StepResult doExecute(StepConfig config, ScenarioContext ctx) throws Exception {
-        Map<String, Object> inputs = config.getInputs();
-        String databaseType = (String) inputs.get("database_type"); // optional filter
-        int limit = parseInt(inputs.getOrDefault("limit", 50), 50);
+        TmListDatasourcesParameter p = config.getInputParameterConfig(TmListDatasourcesParameter.class);
 
         Map<String, Object> queryParams = new HashMap<>();
-        queryParams.put("limit", limit);
+        queryParams.put("limit", p.getLimit());
 
-        if (databaseType != null && !databaseType.isBlank()) {
+        if (p.getDatabaseType() != null && !p.getDatabaseType().isBlank()) {
             // TM uses JSON filter param — try both approaches
-            queryParams.put("filter", "{\"database_type\":\"" + databaseType + "\"}");
+            queryParams.put("filter", "{\"database_type\":\"" + p.getDatabaseType() + "\"}");
         }
 
-        log.info("[TM] Listing Connections (limit={}, filter={})", limit, databaseType);
+        log.info("[TM] Listing Connections (limit={}, filter={})", p.getLimit(), p.getDatabaseType());
         JsonNode resp = client.get("/api/Connections", queryParams);
 
         JsonNode items = resp.has("items") ? resp.get("items") : resp;
@@ -89,9 +87,5 @@ public class TmListDatasourcesAction extends BaseStep {
 
     private static String text(JsonNode n, String key) {
         return n.has(key) && !n.get(key).isNull() ? n.get(key).asText() : null;
-    }
-
-    private static int parseInt(Object v, int def) {
-        try { return Integer.parseInt(String.valueOf(v)); } catch (Exception e) { return def; }
     }
 }

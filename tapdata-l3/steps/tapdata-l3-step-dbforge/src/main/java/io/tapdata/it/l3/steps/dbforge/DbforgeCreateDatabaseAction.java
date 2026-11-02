@@ -51,15 +51,15 @@ public class DbforgeCreateDatabaseAction extends BaseStep {
 
     @Override
     protected StepResult doExecute(StepConfig config, ScenarioContext ctx) throws Exception {
-        Map<String, Object> inputs = config.getInputs();
+        DbforgeCreateDatabaseParameter p = config.getInputParameterConfig(DbforgeCreateDatabaseParameter.class);
 
-        String dbType = required(inputs, "db_type");
-        String mode = (String) inputs.get("mode");
-        String topology = (String) inputs.get("topology");
+        if (p.getDbType() == null || p.getDbType().isBlank()) {
+            throw new IllegalArgumentException("Required input missing: db_type");
+        }
 
-        log.info("[DBForge] Creating lease: db_type={}, mode={}, topology={}", dbType, mode, topology);
+        log.info("[DBForge] Creating lease: db_type={}, mode={}, topology={}", p.getDbType(), p.getMode(), p.getTopology());
 
-        DbforgeClient.LeaseResult lease = client.createLease(dbType, mode, topology);
+        DbforgeClient.LeaseResult lease = client.createLease(p.getDbType(), p.getMode(), p.getTopology());
 
         if (!config.isKeepAlive()) {
             final String leaseId = lease.leaseId;
@@ -75,13 +75,5 @@ public class DbforgeCreateDatabaseAction extends BaseStep {
 
         log.info("[DBForge] Lease created: id={}, jdbc_url={}", lease.leaseId, lease.jdbcUrl);
         return success(lease.toMap());
-    }
-
-    private static String required(Map<String, Object> inputs, String key) {
-        Object v = inputs.get(key);
-        if (v == null || v.toString().isBlank()) {
-            throw new IllegalArgumentException("Required input missing: " + key);
-        }
-        return v.toString();
     }
 }

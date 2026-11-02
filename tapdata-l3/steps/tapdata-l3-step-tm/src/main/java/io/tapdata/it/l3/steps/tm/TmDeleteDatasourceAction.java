@@ -43,23 +43,17 @@ public class TmDeleteDatasourceAction extends BaseStep {
 
     @Override
     protected StepResult doExecute(StepConfig config, ScenarioContext ctx) throws Exception {
-        Map<String, Object> inputs = config.getInputs();
-        String connectionId = required(inputs, "connection_id");
-        log.info("[TM] Deleting Connection {}", connectionId);
-        client.delete("/api/Connections/" + connectionId);
-        log.info("[TM] Connection {} deleted", connectionId);
+        TmDeleteDatasourceParameter p = config.getInputParameterConfig(TmDeleteDatasourceParameter.class);
+        if (p.getConnectionId() == null || p.getConnectionId().isBlank()) {
+            throw new IllegalArgumentException("Required input missing: connection_id");
+        }
+        log.info("[TM] Deleting Connection {}", p.getConnectionId());
+        client.delete("/api/Connections/" + p.getConnectionId());
+        log.info("[TM] Connection {} deleted", p.getConnectionId());
 
         Map<String, Object> outputs = new LinkedHashMap<>();
-        outputs.put("connection_id", connectionId);
+        outputs.put("connection_id", p.getConnectionId());
         outputs.put("deleted", true);
         return success(outputs);
-    }
-
-    private static String required(Map<String, Object> inputs, String key) {
-        Object v = inputs.get(key);
-        if (v == null || v.toString().isBlank()) {
-            throw new IllegalArgumentException("Required input missing: " + key);
-        }
-        return v.toString();
     }
 }

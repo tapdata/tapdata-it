@@ -46,10 +46,12 @@ public class TmGetTaskAction extends BaseStep {
 
     @Override
     protected StepResult doExecute(StepConfig config, ScenarioContext ctx) throws Exception {
-        Map<String, Object> inputs = config.getInputs();
-        String taskId = required(inputs, "task_id");
-        log.info("[TM] Fetching Task {}", taskId);
-        JsonNode task = client.get("/api/Task/" + taskId);
+        TmGetTaskParameter p = config.getInputParameterConfig(TmGetTaskParameter.class);
+        if (p.getTaskId() == null || p.getTaskId().isBlank()) {
+            throw new IllegalArgumentException("Required input missing: task_id");
+        }
+        log.info("[TM] Fetching Task {}", p.getTaskId());
+        JsonNode task = client.get("/api/Task/" + p.getTaskId());
 
         Map<String, Object> outputs = new LinkedHashMap<>();
         outputs.put("task_id", text(task, "id"));
@@ -60,20 +62,12 @@ public class TmGetTaskAction extends BaseStep {
         outputs.put("source_connection_id", text(task, "sourceConnectionId"));
         outputs.put("target_connection_id", text(task, "targetConnectionId"));
 
-        log.info("[TM] Task {}: name={}, status={}, type={}", taskId,
+        log.info("[TM] Task {}: name={}, status={}, type={}", p.getTaskId(),
                 outputs.get("name"), outputs.get("status"), outputs.get("type"));
         return success(outputs);
     }
 
     private static String text(JsonNode n, String key) {
         return n.has(key) && !n.get(key).isNull() ? n.get(key).asText() : null;
-    }
-
-    private static String required(Map<String, Object> inputs, String key) {
-        Object v = inputs.get(key);
-        if (v == null || v.toString().isBlank()) {
-            throw new IllegalArgumentException("Required input missing: " + key);
-        }
-        return v.toString();
     }
 }

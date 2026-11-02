@@ -52,17 +52,23 @@ public class DbforgeExecuteSqlAction extends BaseStep {
 
     @Override
     protected StepResult doExecute(StepConfig config, ScenarioContext ctx) throws Exception {
-        Map<String, Object> inputs = config.getInputs();
+        DbforgeExecuteSqlParameter p = config.getInputParameterConfig(DbforgeExecuteSqlParameter.class);
 
-        String jdbcUrl = required(inputs, "jdbc_url");
-        String username = required(inputs, "username");
-        String password = (String) inputs.get("password"); // can be null for some DBs
-        String sql = required(inputs, "sql");
-        String driverClass = (String) inputs.get("driver_class"); // optional, auto-detect if missing
+        // 业务必填校验
+        if (p.getJdbcUrl() == null || p.getJdbcUrl().isBlank()) {
+            throw new IllegalArgumentException("Required input missing: jdbc_url");
+        }
+        if (p.getUsername() == null || p.getUsername().isBlank()) {
+            throw new IllegalArgumentException("Required input missing: username");
+        }
+        if (p.getSql() == null || p.getSql().isBlank()) {
+            throw new IllegalArgumentException("Required input missing: sql");
+        }
 
         // Resolve driver class
+        String driverClass = p.getDriverClass();
         if (driverClass == null || driverClass.isBlank()) {
-            driverClass = detectDriver(jdbcUrl);
+            driverClass = detectDriver(p.getJdbcUrl());
             log.info("[DBForge] Auto-detected driver: {}", driverClass);
         }
 
@@ -75,13 +81,13 @@ public class DbforgeExecuteSqlAction extends BaseStep {
         }
 
         // Split multi-statement SQL
-        List<String> statements = splitStatements(sql);
-        log.info("[DBForge] Executing {} statement(s) on {}", statements.size(), jdbcUrl);
+        List<String> statements = splitStatements(p.getSql());
+        log.info("[DBForge] Executing {} statement(s) on {}", statements.size(), p.getJdbcUrl());
 
         int totalAffected = 0;
         List<Map<String, Object>> results = new ArrayList<>();
 
-        try (Connection conn = DriverManager.getConnection(jdbcUrl, username, password)) {
+        try (Connection conn = DriverManager.getConnection(p.getJdbcUrl(), p.getUsername(), p.getPassword())) {
             for (int i = 0; i < statements.size(); i++) {
                 String stmt = statements.get(i).trim();
                 if (stmt.isEmpty()) continue;
@@ -156,13 +162,5 @@ public class DbforgeExecuteSqlAction extends BaseStep {
 
     private static String truncate(String s, int max) {
         return s.length() > max ? s.substring(0, max) + "..." : s;
-    }
-
-    private static String required(Map<String, Object> inputs, String key) {
-        Object v = inputs.get(key);
-        if (v == null || v.toString().isBlank()) {
-            throw new IllegalArgumentException("Required input missing: " + key);
-        }
-        return v.toString();
     }
 }
