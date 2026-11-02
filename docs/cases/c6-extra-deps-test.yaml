@@ -1,0 +1,87 @@
+# ============================================================================
+# L3-C6: extra_deps 运行时依赖动态加载验证
+#
+# 目标：验证 DSL 中 extra_deps 字段能让 PluginCenter 在 step 执行前
+#       从 Maven Central 下载指定的额外 jar（+ 全部传递依赖），
+#       并注入到 step 执行时可见的 classloader 里。
+#
+# 机制：
+#   DSL extra_deps (StepConfig.extraDeps)
+#     + ActionHandler.getRuntimeDependencies() (代码声明)
+#       → StepRunner.run() 执行前自动调 PluginCenter.addRuntimeDependencies()
+#         → MavenPluginResolver.resolveWithDependencies(coords)
+#           → ~/.m2/repository 本地缓存
+#             → 重建 URLClassLoader（合并旧 CL URL + 新 deps URL）
+#
+# 本用例场景：用 assert_jdbc_data 对 SQLite 数据库做 DDL/DML + SELECT + assert。
+# SQLite JDBC 驱动不在宿主 fat jar 里，**完全靠 extra_deps 动态加载**。
+# ============================================================================
+
+case_id: L3-C6-EXTRA-DEPS
+scenario: "extra_deps 运行时依赖加载 — SQLite JDBC 动态下载验证"
+group: advanced
+
+steps:
+  # --- Step 1: 用 extra_deps 动态加载的 SQLite JDBC 创建测试 DB + 表 + 种子数据 ---
+  - id: setup_sqlite
+    action: assert_jdbc_data
+    sql_type: execute
+    timeout_seconds: 30
+    extra_deps:
+      - "org.xerial:sqlite-jdbc:3.45.3.0"
+    inputs:
+      jdbc_url: "jdbc:sqlite:/tmp/l3-c6-test.db"
+      sql: |
+        CREATE TABLE IF NOT EXISTS users (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL
+        );
+        INSERT INTO users (name) VALUES ('alice'), ('bob'), ('carol');
+        CREATE TABLE IF NOT EXISTS orders (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          total REAL NOT NULL
+        );
+        INSERT INTO orders (user_id, total) VALUES (1, 99.99), (2, 49.50), (2, 120.00), (3, 15.00);
+
+  # --- Step 2: 验证 users 表有 3 行 ---
+  - id: assert_users_count
+    action: assert_jdbc_data
+    extra_deps:
+      - "org.xerial:sqlite-jdbc:3.45.3.0"
+    inputs:
+      jdbc_url: "jdbc:sqlite:/tmp/l3-c6-test.db"
+      sql: "SELECT COUNT(*) AS cnt FROM users"
+      assert_mode: row_count_equals
+      expected_count: 1
+    timeout_seconds: 30
+
+  # --- Step 3: 验证 orders 表有 4 行 ---
+  - id: assert_orders_count
+    action: assert_jdbc_data
+    extra_deps:
+      - "org.xerial:sqlite-jdbc:3.45.3.0"
+    inputs:
+      jdbc_url: "jdbc:sqlite:/tmp/l3-c6-test.db"
+      sql: "SELECT COUNT(*) AS cnt FROM orders"
+      assert_mode: row_count_equals
+      expected_count: 1
+    timeout_seconds: 30
+
+  # --- Step 4: 验证 orders total 总和 (99.99 + 49.50 + 120.00 + 15.00 = 284.49) ---
+  - id: assert_orders_total
+    action: assert_jdbc_data
+    extra_deps:
+      - "org.xerial:sqlite-jdbc:3.45.3.0"
+    inputs:
+      jdbc_url: "jdbc:sqlite:/tmp/l3-c6-test.db"
+      sql: "SELECT SUM(total) AS s FROM orders"
+      assert_mode: value_equals
+      column: s
+      expected: "284.49"
+    timeout_seconds: 30
+
+  - id: done
+    action: echo
+    inputs:
+      message: "C6 extra_deps test complete ✅ SQLite DB at /tmp/l3-c6-test.db"

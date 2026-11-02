@@ -1,0 +1,29 @@
+# ============================================================================
+# TapData L3 默认 Step 注册表 — actionName → Maven coordinate
+#
+# PluginCenter.init() 时从 classpath:steps-registry.yaml 加载，
+# 当 DSL step 未指定 `use` 字段、且 action 不在 fat jar 内置时，
+# getOrLoadAction() 会根据这里的坐标自动调用 loadPlugin 从 Maven 下载。
+#
+# 构建时自动生成（扫描 steps/*/pom.xml 和各 Action.getActionName()）。
+# 也可以手动编辑 —— 格式：每个 action 一行，冒号后是完整 Maven 坐标。
+#
+# 优先级：DSL `use` > 此注册表 > 内置 step (fat jar)
+# ============================================================================
+
+# --- DBForge step 家族 (3 个 action 共享一个 jar) ---
+dbforge_create_database: "io.tapdata.it.l3:tapdata-l3-step-dbforge:1.0.0-SNAPSHOT"
+dbforge_destroy_database: "io.tapdata.it.l3:tapdata-l3-step-dbforge:1.0.0-SNAPSHOT"
+dbforge_execute_sql: "io.tapdata.it.l3:tapdata-l3-step-dbforge:1.0.0-SNAPSHOT"
+
+# --- TM step 家族 (5 个 action 共享一个 jar) ---
+tm_login: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
+tm_create_datasource: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
+tm_list_datasources: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
+tm_delete_datasource: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
+tm_get_task: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
+
+# --- Assert-JDBC step 家族 ---
+assert_jdbc_data: "io.tapdata.it.l3:tapdata-l3-step-assert-jdbc:1.0.0-SNAPSHOT"
+
+# 注意：echo / sleep 是 tapdata-l3-core 内置 step（不需要外置加载）

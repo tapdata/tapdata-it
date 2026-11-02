@@ -1,0 +1,34 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.tapdata.it.l3</groupId>
+        <artifactId>tapdata-l3</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>tapdata-l3-plugin</artifactId>
+    <packaging>jar</packaging>
+    <name>TapData L3 Plugin SPI</name>
+    <description>ActionHandler SPI interface — external step libraries only depend on this module (zero Spring Boot)</description>
+
+    <dependencies>
+        <!-- SPI interface references StepConfig/ScenarioContext from common -->
+        <dependency>
+            <groupId>io.tapdata.it.l3</groupId>
+            <artifactId>tapdata-l3-common</artifactId>
+        </dependency>
+        <!-- slf4j-api — BaseStep uses SLF4J Logger (logback comes from downstream modules) -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+        <!-- lombok — StepResult uses @Builder @Getter -->
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+        </dependency>
+    </dependencies>
+</project>

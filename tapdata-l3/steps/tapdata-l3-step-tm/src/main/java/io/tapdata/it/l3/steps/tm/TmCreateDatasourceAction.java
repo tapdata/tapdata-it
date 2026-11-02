@@ -1,0 +1,182 @@
+package io.tapdata.it.l3.steps.tm;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import io.tapdata.it.l3.common.ScenarioContext;
+import io.tapdata.it.l3.common.StepConfig;
+import io.tapdata.it.l3.plugin.step.StepResult;
+import io.tapdata.it.l3.plugin.step.BaseStep;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+/**
+ * Create a new datasource Connection in TM.
+ * <p>
+ * Automatically resolves {@code pdkHash} from the {@code database_type} via the
+ * {@code /api/DatabaseTypes} API (unless you pass it explicitly).
+ *
+ * <pre>
+ * # Minimal — resolves pdkHash automatically:
+ * - id: create_mysql_conn
+ *   action: tm_create_datasource
+ *   inputs:
+ *     name: "l3_test_mysql"
+ *     database_type: "Mysql"              # Mysql / MongoDB / PostgreSQL / ...
+ *     connection_type: "source_and_target" # source / target / source_and_target
+ *     database_host: "#{ #steps['create_mysql'].outputs['host'] }"
+ *     database_port: "#{ #steps['create_mysql'].outputs['port'] }"
+ *     database_username: "#{ #steps['create_mysql'].outputs['username'] }"
+ *     database_password: "#{ #steps['create_mysql'].outputs['password'] }"
+ *     database_name: "#{ #steps['create_mysql'].outputs['database'] }"
+ *
+ * # Full — explicit pdkHash:
+ * - id: create_pg_conn
+ *   action: tm_create_datasource
+ *   inputs:
+ *     name: "l3_test_pg"
+ *     database_type: "PostgreSQL"
+ *     pdk_hash: "a5af410b..."
+ *     connection_type: "source_and_target"
+ *     database_host: "..."
+ *     database_port: 5432
+ *     database_username: "..."
+ *     database_password: "..."
+ *     database_name: "..."
+ *     # Optional raw PDK config override (merged with flat fields):
+ *     config:
+ *       ssl: false
+ * </pre>
+ *
+ * Outputs: {@code connection_id}, {@code name}, {@code pdk_hash}, {@code database_type}
+ */
+public class TmCreateDatasourceAction extends BaseStep {
+
+    private static final Logger log = LoggerFactory.getLogger(TmCreateDatasourceAction.class);
+
+    /** 在 before() 中惰性创建 — 反射实例化时不能带依赖。 */
+    private TmClient client;
+
+    /** 无参构造器 — 反射实例化必备。 */
+    public TmCreateDatasourceAction() {}
+
+    @Override
+    public void before(StepConfig config, ScenarioContext ctx) {
+        if (client == null) {
+            client = new TmClient();
+        }
+    }
+
+    @Override
+    public String getActionName() {
+        return "tm_create_datasource";
+    }
+
+    @Override
+    protected StepResult doExecute(StepConfig config, ScenarioContext ctx) throws Exception {
+        Map<String, Object> inputs = config.getInputs();
+
+        String name = required(inputs, "name");
+        String databaseType = required(inputs, "database_type");
+        String connectionType = (String) inputs.getOrDefault("connection_type", "source_and_target");
+        String databaseHost = required(inputs, "database_host");
+        int databasePort = Integer.parseInt(required(inputs, "database_port"));
+        String databaseUsername = required(inputs, "database_username");
+        String databasePassword = (String) inputs.get("database_password");
+        String databaseName = (String) inputs.get("database_name");
+        String pdkHash = (String) inputs.get("pdk_hash"); // optional, auto-resolve if missing
+        Object rawConfig = inputs.get("config"); // optional extra PDK config
+
+        // Auto-resolve pdkHash from DatabaseTypes API
+        if (pdkHash == null || pdkHash.isBlank()) {
+            pdkHash = resolvePdkHash(databaseType);
+            log.info("[TM] Auto-resolved pdkHash for {} → {}", databaseType, pdkHash);
+        }
+
+        // Build flat request body (matches DataSourceConnectionDto)
+        Map<String, Object> body = new HashMap<>();
+        body.put("name", name);
+        body.put("database_type", databaseType);
+        body.put("pdkHash", pdkHash);
+        body.put("connection_type", connectionType);
+        body.put("database_host", databaseHost);
+        body.put("database_port", databasePort);
+        body.put("database_username", databaseUsername);
+        body.put("database_password", databasePassword);
+        body.put("database_name", databaseName);
+
+        // Build PDK config JSON (nested)
+        Map<String, Object> pdkConfig = new LinkedHashMap<>();
+        pdkConfig.put("__connectionType", connectionType);
+        pdkConfig.put("host", databaseHost);
+        pdkConfig.put("port", databasePort);
+        pdkConfig.put("username", databaseUsername);
+        pdkConfig.put("password", databasePassword);
+        if (databaseName != null) pdkConfig.put("database", databaseName);
+
+        // Merge caller-provided config overrides
+        if (rawConfig instanceof Map) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> extras = (Map<String, Object>) rawConfig;
+            pdkConfig.putAll(extras);
+        }
+        body.put("config", pdkConfig);
+
+        log.info("[TM] Creating Connection '{}' (type={}, pdkHash={})", name, databaseType, pdkHash);
+        JsonNode resp = client.post("/api/Connections", body);
+
+        String connectionId = text(resp, "id");
+        log.info("[TM] Connection created: id={}", connectionId);
+
+        // Auto-cleanup unless keep_alive
+        if (!config.isKeepAlive() && connectionId != null) {
+            ctx.registerCleanup(() -> {
+                try {
+                    log.info("[TM] Auto-deleting Connection {}", connectionId);
+                    client.delete("/api/Connections/" + connectionId);
+                } catch (Exception e) {
+                    log.warn("[TM] Failed to auto-delete Connection {}: {}", connectionId, e.getMessage());
+                }
+            });
+        }
+
+        Map<String, Object> outputs = new LinkedHashMap<>();
+        outputs.put("connection_id", connectionId);
+        outputs.put("name", text(resp, "name"));
+        outputs.put("pdk_hash", text(resp, "pdkHash"));
+        outputs.put("database_type", text(resp, "database_type"));
+        return success(outputs);
+    }
+
+    /** Query /api/DatabaseTypes to find the pdkHash matching the given database type. */
+    private String resolvePdkHash(String databaseType) throws IOException, InterruptedException {
+        JsonNode types = client.get("/api/DatabaseTypes");
+        if (types.isArray()) {
+            for (JsonNode t : types) {
+                String tType = text(t, "type");
+                String tName = text(t, "name");
+                if (databaseType.equalsIgnoreCase(tType) || databaseType.equalsIgnoreCase(tName)) {
+                    String hash = text(t, "pdkHash");
+                    if (hash != null) return hash;
+                }
+            }
+        }
+        throw new IllegalArgumentException("Cannot auto-resolve pdkHash for database_type='" + databaseType
+                + "'. Pass pdk_hash explicitly or check /api/DatabaseTypes for supported types.");
+    }
+
+    private static String text(JsonNode n, String key) {
+        return n.has(key) && !n.get(key).isNull() ? n.get(key).asText() : null;
+    }
+
+    private static String required(Map<String, Object> inputs, String key) {
+        Object v = inputs.get(key);
+        if (v == null || v.toString().isBlank()) {
+            throw new IllegalArgumentException("Required input missing: " + key);
+        }
+        return v.toString();
+    }
+}

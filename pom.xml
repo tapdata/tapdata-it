@@ -40,13 +40,14 @@
     <modules>
         <module>tapdata-it-common</module>
         <module>tapdata-connector-it</module>
+        <module>tapdata-l3</module>
     </modules>
 
     <distributionManagement>
         <repository>
             <id>nexus-tapdata-net</id>
             <name>Nexus Release Repository</name>
-            <url>https://nexus.tapdata.net/repository/maven-public/</url>
+            <url>https://nexus.tapdata.net/repository/maven-releases/</url>
         </repository>
         <snapshotRepository>
             <id>nexus-tapdata-net</id>

@@ -1,0 +1,69 @@
+case_id: "L3-C3-DBFORGE"
+scenario: "C3 DBForge End-to-End — Create Lease, Execute SQL via JDBC, Auto-Cleanup"
+group: "functional"
+description: "Full dbforge step chain: create dedicated MySQL + PostgreSQL (parallel) → JDBC CREATE TABLE + INSERT → auto-cleanup on teardown"
+
+variables:
+  table_name: "c3_test"
+
+steps:
+  # Step 1: Provision dedicated MySQL
+  - id: "create_mysql"
+    action: "dbforge_create_database"
+    inputs:
+      db_type: "mysql"
+      mode: "dedicated"
+      topology: "single"
+    outputs: [lease_id, jdbc_url, host, port, database, username, password]
+    timeout_seconds: 90
+
+  # Step 2: Provision dedicated PostgreSQL (parallel)
+  - parallel:
+      - id: "create_postgres"
+        action: "dbforge_create_database"
+        inputs:
+          db_type: "postgresql"
+          mode: "dedicated"
+          topology: "single"
+        outputs: [lease_id, jdbc_url, host, port, database, username, password]
+        timeout_seconds: 90
+
+  # Step 3: Initialize MySQL table + seed data via JDBC
+  - id: "init_mysql"
+    action: "dbforge_execute_sql"
+    inputs:
+      jdbc_url: "#{ #steps['create_mysql'].outputs['jdbc_url'] }"
+      username: "#{ #steps['create_mysql'].outputs['username'] }"
+      password: "#{ #steps['create_mysql'].outputs['password'] }"
+      sql: |
+        CREATE TABLE c3_test (
+          id INT PRIMARY KEY,
+          name VARCHAR(50)
+        );
+        INSERT INTO c3_test VALUES (1, 'Alice');
+        INSERT INTO c3_test VALUES (2, 'Bob');
+        SELECT COUNT(*) AS cnt FROM c3_test;
+    timeout_seconds: 30
+
+  # Step 4: Initialize PostgreSQL table + cross-DB seed via JDBC (parallel)
+  - parallel:
+      - id: "init_postgres"
+        action: "dbforge_execute_sql"
+        inputs:
+          jdbc_url: "#{ #steps['create_postgres'].outputs['jdbc_url'] }"
+          username: "#{ #steps['create_postgres'].outputs['username'] }"
+          password: "#{ #steps['create_postgres'].outputs['password'] }"
+          sql: |
+            CREATE TABLE c3_test (
+              id INT PRIMARY KEY,
+              name VARCHAR(50)
+            );
+            INSERT INTO c3_test VALUES (1, 'Alice');
+            SELECT COUNT(*) AS cnt FROM c3_test;
+        timeout_seconds: 30
+
+  # Step 5: Echo connection info for verification
+  - id: "log_summary"
+    action: "echo"
+    inputs:
+      message: "MySQL lease=#{ #steps['create_mysql'].outputs['lease_id'] }, PG lease=#{ #steps['create_postgres'].outputs['lease_id'] }. Cleanup will release both automatically."

@@ -1,0 +1,37 @@
+# ============================================================================
+# L3-C7: 默认注册表自动加载 + DSL use 显式覆盖 验证
+#
+# 目标：验证当 action 不在 fat jar 内置时，getOrLoadAction 能：
+#   a) 从 steps-registry.yaml 默认注册表找到坐标 → 自动 loadPlugin
+#   b) 或从 DSL use 字段显式指定坐标（覆盖注册表版本）
+#
+# 当前 Phase 1 所有 step 仍在 fat jar 里，所以 built-in 路径会先命中。
+# Phase 2 移除 step 模块后，registry fallback 路径才真正走通。
+# 本用例验证 DSL `use` 字段解析 + 透传链路正确。
+# ============================================================================
+
+case_id: L3-C7-REGISTRY-LOAD
+scenario: "默认注册表 + DSL use 显式覆盖验证"
+group: advanced
+
+steps:
+  # 内置 step echo — 不写 use，验证 getOrLoadAction 内置路径直接命中
+  - id: builtin_echo
+    action: echo
+    inputs:
+      message: "✅ builtin path works (echo 是 core 内置 step)"
+
+  # assert_jdbc_data — 显式 use 写 registry 里的坐标（测试 DSL use 字段解析）
+  # 虽然当前 assert_jdbc_data 也在 fat jar，但 use 字段能正确解析并透传到 StepRunner
+  - id: registry_echo
+    action: assert_jdbc_data
+    use: "io.tapdata.it.l3:tapdata-l3-step-assert-jdbc:1.0.0-SNAPSHOT"
+    extra_deps:
+      - "org.xerial:sqlite-jdbc:3.45.3.0"
+    inputs:
+      jdbc_url: "jdbc:sqlite:/tmp/l3-c7-test.db"
+      sql: "SELECT 1 AS one"
+      assert_mode: value_equals
+      column: one
+      expected: "1"
+    timeout_seconds: 30

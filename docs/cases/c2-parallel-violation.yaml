@@ -1,0 +1,19 @@
+case_id: "L3-C2-VIOLATION"
+scenario: "C2 Parallel Independence Violation — Should FAIL at Parse Time"
+group: "functional"
+description: "验证 DSL Parser 拒绝 parallel 块内 cross-step output 引用"
+
+steps:
+  - parallel:
+      - id: step_a
+        action: echo
+        inputs:
+          message: "A"
+        outputs: [echoed]
+
+      # ❌ step_b references step_a's outputs — both inside same parallel block
+      # DSL parser must reject this with DslParseException
+      - id: step_b
+        action: echo
+        inputs:
+          message: "#{ #steps['step_a'].outputs['echoed'] }"

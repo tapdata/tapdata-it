@@ -1,0 +1,36 @@
+case_id: "L3-C2-PARALLEL"
+scenario: "C2 Parallel Block + Timeout Validation"
+group: "functional"
+description: "验证 parallel 块并行执行 + BaseStep async timeout + 链式 outputs 引用"
+
+variables:
+  hello: "Hello"
+
+steps:
+  # === Test 1: Parallel block — two independent echo steps run concurrently ===
+  - parallel:
+      - id: "echo_a"
+        action: "echo"
+        inputs:
+          message: "Parallel A from #{ #variables['hello'] }"
+        outputs: [echoed]
+
+      - id: "echo_b"
+        action: "echo"
+        inputs:
+          message: "Parallel B"
+        outputs: [echoed]
+
+  # === Test 2: Sequential step referencing parallel outputs ===
+  - id: "verify_parallel"
+    action: "echo"
+    inputs:
+      message: "A=#{ #steps['echo_a'].outputs['echoed'] }, B=#{ #steps['echo_b'].outputs['echoed'] }"
+
+  # === Test 3: Async timeout — sleep 30s but timeout is 2s ===
+  # Expected: StepTimeoutException caught, scenario marked failed
+  - id: "should_timeout"
+    action: "sleep"
+    inputs:
+      seconds: 30
+    timeout_seconds: 2

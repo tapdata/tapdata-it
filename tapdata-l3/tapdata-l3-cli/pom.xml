@@ -1,0 +1,59 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.tapdata.it.l3</groupId>
+        <artifactId>tapdata-l3</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>tapdata-l3-cli</artifactId>
+    <packaging>jar</packaging>
+    <name>TapData L3 CLI</name>
+    <description>Picocli command-line entry point + executable Fat Jar packaging</description>
+
+    <dependencies>
+        <!-- Core runtime (brings Spring Boot as transitive) -->
+        <dependency>
+            <groupId>io.tapdata.it.l3</groupId>
+            <artifactId>tapdata-l3-core</artifactId>
+        </dependency>
+        <!-- Step modules moved to EXTERNAL loading: PluginCenter defaultRegistry → Maven download at runtime -->
+        <!-- CLI no longer depends on step modules. They are downloaded via MavenPluginResolver on demand. -->
+        <!-- CLI engine -->
+        <dependency>
+            <groupId>info.picocli</groupId>
+            <artifactId>picocli</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>tapdata-l3-cli</finalName>
+        <plugins>
+            <!-- Spring Boot repackage → executable Fat Jar -->
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <goals><goal>repackage</goal></goals>
+                        <configuration>
+                            <classifier>fat</classifier>
+                            <mainClass>io.tapdata.it.l3.cli.L3CliApplication</mainClass>
+                            <!-- Repackage Spring Boot nested JARs for PF4J PluginClassLoader compatibility -->
+                            <layers>
+                                <enabled>true</enabled>
+                            </layers>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
