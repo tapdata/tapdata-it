@@ -66,6 +66,11 @@
                 <artifactId>tapdata-l3-step-assert-jdbc</artifactId>
                 <version>${l3.version}</version>
             </dependency>
+            <dependency>
+                <groupId>io.tapdata.it.l3</groupId>
+                <artifactId>tapdata-l3-step-jdbc</artifactId>
+                <version>${l3.version}</version>
+            </dependency>
 
             <!-- TapData existing module -->
             <dependency>

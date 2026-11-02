@@ -17,5 +17,6 @@
     <module>tapdata-l3-step-dbforge</module>
     <module>tapdata-l3-step-tm</module>
     <module>tapdata-l3-step-assert-jdbc</module>
+    <module>tapdata-l3-step-jdbc</module>
 </modules>
 </project>
