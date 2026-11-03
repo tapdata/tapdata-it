@@ -1,0 +1,146 @@
+# =============================================================================
+# L3 Golden Path — Local MySQL→MySQL via tapsupertest7
+# =============================================================================
+
+case_id: "L3-GP-MYSQL-LOCAL"
+scenario: "Golden Path — Local MySQL→MySQL via tapsupertest7"
+description: "验证 MySQL→MySQL 全量同步 + CDC + TM VDC 校验 (用 tapsupertest7 agent + 本地 MySQL)"
+
+steps:
+
+# 1. 登录 TM
+  - id: login_tm
+    action: tm_login
+    keep_alive: true
+    outputs: [tm_token]
+
+# 2-3. 并行创建源和目标数据源（各自独立，无 outputs 交叉引用）
+  - parallel:
+      - id: create_src_datasource
+        action: tm_create_datasource
+        keep_alive: false
+        timeout_seconds: 30
+        inputs:
+          name: "GP_Src_Local_run60"
+          database_type: "Mysql"
+          agent_id: "8b144363-7abf-466a-b3ef-06a16bb6fa25"
+          database_host: "172.17.0.1"
+          database_port: 23306
+          database_username: "root"
+          database_password: "Gotapd8!"
+          database_name: "gp_src_local"
+        outputs: [connection_id]
+
+      - id: create_tgt_datasource
+        action: tm_create_datasource
+        keep_alive: false
+        timeout_seconds: 30
+        inputs:
+          name: "GP_Tgt_Local_run60"
+          database_type: "Mysql"
+          agent_id: "8b144363-7abf-466a-b3ef-06a16bb6fa25"
+          database_host: "172.17.0.1"
+          database_port: 33306
+          database_username: "root"
+          database_password: "Gotapd8!"
+          database_name: "gp_tgt_local"
+        outputs: [connection_id]
+
+# 4. 连接测试
+  - id: test_src_connection
+    action: tm_test_connection
+    timeout_seconds: 15
+    inputs:
+      connection_id: "#{ #steps['create_src_datasource'].outputs['connection_id'] }"
+
+  - id: test_tgt_connection
+    action: tm_test_connection
+    timeout_seconds: 15
+    inputs:
+      connection_id: "#{ #steps['create_tgt_datasource'].outputs['connection_id'] }"
+
+# 5. 创建同步任务
+  - id: create_sync_task
+    action: tm_create_task
+    keep_alive: false
+    timeout_seconds: 60
+    inputs:
+      name: "GP_MySQL_Local_run60"
+      sync_type: "migrate"
+      agent_id: "8b144363-7abf-466a-b3ef-06a16bb6fa25"
+      source_connection_id: "#{ #steps['create_src_datasource'].outputs['connection_id'] }"
+      target_connection_id: "#{ #steps['create_tgt_datasource'].outputs['connection_id'] }"
+      source_tables: ["gp_users_local", "gp_orders_local"]
+    outputs: [task_id]
+
+# 6. 启动同步
+  - id: start_sync_task
+    action: tm_start_task
+    timeout_seconds: 15
+    inputs:
+      task_id: "#{ #steps['create_sync_task'].outputs['task_id'] }"
+
+# 7. 等待全量同步完成
+  - id: wait_full_sync
+    action: tm_wait_task
+    timeout_seconds: 300
+    inputs:
+      task_id: "#{ #steps['create_sync_task'].outputs['task_id'] }"
+      target_status: "complete"
+      poll_interval_ms: 5000
+
+# 8. 写入增量数据
+  - id: write_incremental
+    action: jdbc_write_incremental
+    keep_alive: false
+    timeout_seconds: 30
+    inputs:
+      jdbc_url: "jdbc:mysql://127.0.0.1:23306/gp_src_local"
+      username: "root"
+      password: "Gotapd8!"
+      inserts:
+        - table: "gp_users_local"
+          columns: ["name", "email"]
+          values: [["Dave", "dave@test.com"], ["Eve", "eve@test.com"]]
+        - table: "gp_orders_local"
+          columns: ["user_id", "amount", "status"]
+          values: [[1, 199.99, "paid"], [3, 49.99, "pending"]]
+
+# 9. 创建 Inspect
+  - id: create_inspect_task
+    action: tm_create_inspect
+    keep_alive: false
+    timeout_seconds: 60
+    inputs:
+      name: "GP_VDC_run60"
+      task_id: "#{ #steps['create_sync_task'].outputs['task_id'] }"
+      agent_id: "8b144363-7abf-466a-b3ef-06a16bb6fa25"
+      source_connection_id: "#{ #steps['create_src_datasource'].outputs['connection_id'] }"
+      target_connection_id: "#{ #steps['create_tgt_datasource'].outputs['connection_id'] }"
+      tables: ["gp_users_local", "gp_orders_local"]
+      inspect_mode: "all"
+    outputs: [inspect_id]
+
+# 10. 执行 Inspect
+  - id: run_inspect_full
+    action: tm_execute_inspect
+    timeout_seconds: 120
+    inputs:
+      inspect_id: "#{ #steps['create_inspect_task'].outputs['inspect_id'] }"
+      wait_timeout_seconds: 90
+
+# 11. 断言结果
+  - id: assert_inspect_full
+    action: tm_assert_inspect_result
+    timeout_seconds: 15
+    inputs:
+      inspect_id: "#{ #steps['create_inspect_task'].outputs['inspect_id'] }"
+      allow_mismatch: false
+      max_mismatch_rows: 0
+
+# 12. 停止清理
+  - id: stop_task
+    action: tm_stop_task
+    timeout_seconds: 15
+    inputs:
+      task_id: "#{ #steps['create_sync_task'].outputs['task_id'] }"

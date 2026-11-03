@@ -1,0 +1,9 @@
+case_id: "L3-C1-VALIDATE"
+scenario: "C1 Validation — Missing required field (should fail parse)"
+group: "functional"
+description: "This YAML is intentionally broken — missing required 'action' field. DSL parser should reject it."
+
+steps:
+  - id: "bad_step"
+    inputs:
+      foo: bar

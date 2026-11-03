@@ -1,0 +1,176 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.tapdata</groupId>
+        <artifactId>tapdata-it</artifactId>
+        <version>1.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <groupId>io.tapdata.it.l3</groupId>
+    <artifactId>tapdata-l3</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+    <packaging>pom</packaging>
+    <name>TapData L3 Integration Test Framework</name>
+
+    <modules>
+        <module>tapdata-l3-common</module>
+        <module>tapdata-l3-plugin</module>
+        <module>tapdata-l3-core</module>
+        <module>tapdata-l3-cli</module>
+        <module>steps</module>
+    </modules>
+
+    <properties>
+        <l3.version>1.0.0-SNAPSHOT</l3.version>
+        <spring-boot.version>3.3.5</spring-boot.version>
+        <picocli.version>4.7.6</picocli.version>
+        <snakeyaml.version>2.3</snakeyaml.version>
+        <awaitility.version>4.2.2</awaitility.version>
+        <pf4j.version>3.11.0</pf4j.version>
+        <maven.resolver.version>1.9.24</maven.resolver.version>
+    </properties>
+
+    <dependencyManagement>
+        <dependencies>
+            <!-- L3 internal modules -->
+            <dependency>
+                <groupId>io.tapdata.it.l3</groupId>
+                <artifactId>tapdata-l3-common</artifactId>
+                <version>${l3.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.tapdata.it.l3</groupId>
+                <artifactId>tapdata-l3-plugin</artifactId>
+                <version>${l3.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.tapdata.it.l3</groupId>
+                <artifactId>tapdata-l3-core</artifactId>
+                <version>${l3.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.tapdata.it.l3</groupId>
+                <artifactId>tapdata-l3-step-dbforge</artifactId>
+                <version>${l3.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.tapdata.it.l3</groupId>
+                <artifactId>tapdata-l3-step-tm</artifactId>
+                <version>${l3.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.tapdata.it.l3</groupId>
+                <artifactId>tapdata-l3-step-assert-jdbc</artifactId>
+                <version>${l3.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.tapdata.it.l3</groupId>
+                <artifactId>tapdata-l3-step-jdbc</artifactId>
+                <version>${l3.version}</version>
+            </dependency>
+
+            <!-- TapData existing module -->
+            <dependency>
+                <groupId>io.tapdata</groupId>
+                <artifactId>tapdata-it-common</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <!-- Spring Boot BOM -->
+            <dependency>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-dependencies</artifactId>
+                <version>${spring-boot.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+
+            <!-- Spring Boot BOM also manages spring-expression, spring-web, jackson, etc. -->
+            <!-- CLI -->
+            <dependency>
+                <groupId>info.picocli</groupId>
+                <artifactId>picocli</artifactId>
+                <version>${picocli.version}</version>
+            </dependency>
+
+            <!-- DSL -->
+            <dependency>
+                <groupId>org.yaml</groupId>
+                <artifactId>snakeyaml</artifactId>
+                <version>${snakeyaml.version}</version>
+            </dependency>
+
+            <!-- Async polling -->
+            <dependency>
+                <groupId>org.awaitility</groupId>
+                <artifactId>awaitility</artifactId>
+                <version>${awaitility.version}</version>
+            </dependency>
+
+            <!-- PF4J plugin framework (optional — MavenPluginResolver is primary loading path) -->
+            <dependency>
+                <groupId>org.pf4j</groupId>
+                <artifactId>pf4j</artifactId>
+                <version>${pf4j.version}</version>
+            </dependency>
+
+            <!-- Maven Artifact Resolver 2.x (official successor to Eclipse Aether) -->
+            <!-- maven-resolver-supplier provides zero-config RepositorySystem bootstrap -->
+            <dependency>
+                <groupId>org.apache.maven.resolver</groupId>
+                <artifactId>maven-resolver-supplier</artifactId>
+                <version>${maven.resolver.version}</version>
+            </dependency>
+
+            <!-- Lombok (optional, reduce boilerplate) -->
+            <dependency>
+                <groupId>org.projectlombok</groupId>
+                <artifactId>lombok</artifactId>
+                <version>1.18.36</version>
+                <scope>provided</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+    <!-- Nexus TapData 私服 —— deploy L3 step 模块到 Nexus -->
+    <!-- server id 对齐 ~/.m2/settings.xml 里的 nexus-tapdata-net（admin/Gotapd8!） -->
+    <distributionManagement>
+        <snapshotRepository>
+            <id>nexus-tapdata-net</id>
+            <name>Nexus TapData Snapshots</name>
+            <url>https://nexus.tapdata.net/repository/maven-snapshots/</url>
+        </snapshotRepository>
+        <repository>
+            <id>nexus-tapdata-net</id>
+            <name>Nexus TapData Releases</name>
+            <url>https://nexus.tapdata.net/repository/maven-public/</url>
+        </repository>
+    </distributionManagement>
+
+    <!-- All L3 submodules inherit Java 17 compilation + Lombok annotation processing -->
+    <build>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>3.13.0</version>
+                    <configuration>
+                        <source>${java.version}</source>
+                        <target>${java.version}</target>
+                        <annotationProcessorPaths>
+                            <path>
+                                <groupId>org.projectlombok</groupId>
+                                <artifactId>lombok</artifactId>
+                                <version>1.18.36</version>
+                            </path>
+                        </annotationProcessorPaths>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
+</project>

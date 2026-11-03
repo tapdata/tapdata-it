@@ -1,0 +1,20 @@
+case_id: "L3-C1-SMOKE"
+scenario: "C1 Smoke Test — Single Echo Step"
+group: "functional"
+description: "Verify the minimal framework can execute a single echo step and handle SpEL evaluation correctly."
+
+variables:
+  greeting: "Hello L3!"
+
+steps:
+  - id: "echo_test"
+    action: "echo"
+    inputs:
+      message: "#{ #variables['greeting'] }"
+    outputs:
+      - "echoed"
+
+  - id: "echo_again"
+    action: "echo"
+    inputs:
+      message: "#{ #steps['echo_test'].outputs['echoed'] } — chained!"

@@ -1,0 +1,50 @@
+case_id: "L3-C4-TM-DATASOURCE"
+scenario: "C4 TM Datasource CRUD — dbforge MySQL → TM Connection create/verify/delete"
+group: "functional"
+description: "End-to-end TM API: create dbforge MySQL lease → auto-provision TM Connection → list connections → auto-delete on teardown"
+
+steps:
+  # Step 1: Provision MySQL via dbforge (reuses C3 capability)
+  - id: "create_mysql"
+    action: "dbforge_create_database"
+    inputs:
+      db_type: "mysql"
+      mode: "dedicated"
+      topology: "single"
+    outputs: [lease_id, jdbc_url, host, port, database, username, password]
+    timeout_seconds: 90
+
+  # Step 2: Auto-login + Create TM Connection
+  - id: "create_tm_connection"
+    action: "tm_create_datasource"
+    inputs:
+      name: "l3_c4_test_mysql"
+      database_type: "Mysql"
+      connection_type: "source_and_target"
+      database_host: "#{ #steps['create_mysql'].outputs['host'] }"
+      database_port: "#{ #steps['create_mysql'].outputs['port'] }"
+      database_username: "#{ #steps['create_mysql'].outputs['username'] }"
+      database_password: "#{ #steps['create_mysql'].outputs['password'] }"
+      database_name: "#{ #steps['create_mysql'].outputs['database'] }"
+    outputs: [connection_id, name, pdk_hash, database_type]
+    timeout_seconds: 30
+
+  # Step 3: Verify connection exists via list
+  - id: "list_connections"
+    action: "tm_list_datasources"
+    inputs:
+      limit: 5
+    timeout_seconds: 15
+
+  # Step 4: Echo summary
+  - id: "summary"
+    action: "echo"
+    inputs:
+      message: "TM Connection created: #{ #steps['create_tm_connection'].outputs['connection_id'] } (pdk=#{ #steps['create_tm_connection'].outputs['pdk_hash'] }). Auto-cleanup will delete TM Connection + dbforge lease."
+
+  # Step 5: Explicit TM Connection delete (also auto-cleanup registered)
+  - id: "cleanup_tm_connection"
+    action: "tm_delete_datasource"
+    inputs:
+      connection_id: "#{ #steps['create_tm_connection'].outputs['connection_id'] }"
+    timeout_seconds: 15

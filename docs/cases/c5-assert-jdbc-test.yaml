@@ -1,0 +1,105 @@
+case_id: "L3-C5-ASSERT-JDBC"
+scenario: "C5 Assert JDBC — verify row counts and values with polling"
+group: "functional"
+description: "dbforge MySQL → CREATE TABLE + INSERT → assert row_count_equals → assert exists → assert empty (polling)"
+
+steps:
+  # Step 1: Provision MySQL
+  - id: "create_mysql"
+    action: "dbforge_create_database"
+    inputs:
+      db_type: "mysql"
+      mode: "dedicated"
+      topology: "single"
+    outputs: [lease_id, jdbc_url, host, port, database, username, password]
+    timeout_seconds: 90
+
+  # Step 2: Create table + seed data
+  - id: "seed_data"
+    action: "dbforge_execute_sql"
+    inputs:
+      jdbc_url: "#{ #steps['create_mysql'].outputs['jdbc_url'] }"
+      username: "#{ #steps['create_mysql'].outputs['username'] }"
+      password: "#{ #steps['create_mysql'].outputs['password'] }"
+      sql: |
+        CREATE TABLE l3_assert_test (
+          id INT PRIMARY KEY,
+          name VARCHAR(50),
+          score INT
+        );
+        INSERT INTO l3_assert_test VALUES (1, 'Alice', 95);
+        INSERT INTO l3_assert_test VALUES (2, 'Bob', 87);
+        INSERT INTO l3_assert_test VALUES (3, 'Carol', 92);
+    timeout_seconds: 30
+
+  # Step 3: Assert row_count_equals = 3 (SELECT * returns actual rows)
+  - id: "assert_count"
+    action: "assert_jdbc_data"
+    inputs:
+      jdbc_url: "#{ #steps['create_mysql'].outputs['jdbc_url'] }"
+      username: "#{ #steps['create_mysql'].outputs['username'] }"
+      password: "#{ #steps['create_mysql'].outputs['password'] }"
+      sql: "SELECT * FROM l3_assert_test"
+      assert_mode: "row_count_equals"
+      expected_count: 3
+    timeout_seconds: 15
+
+  # Step 4: Assert COUNT(*) = 3 via value_equals
+  - id: "assert_count_value"
+    action: "assert_jdbc_data"
+    inputs:
+      jdbc_url: "#{ #steps['create_mysql'].outputs['jdbc_url'] }"
+      username: "#{ #steps['create_mysql'].outputs['username'] }"
+      password: "#{ #steps['create_mysql'].outputs['password'] }"
+      sql: "SELECT COUNT(*) AS cnt FROM l3_assert_test"
+      assert_mode: "value_equals"
+      column: "cnt"
+      expected: 3
+    timeout_seconds: 15
+
+  # Step 5: Assert row_count_gte = 2 (score >= 90 returns Alice + Carol)
+  - id: "assert_gte"
+    action: "assert_jdbc_data"
+    inputs:
+      jdbc_url: "#{ #steps['create_mysql'].outputs['jdbc_url'] }"
+      username: "#{ #steps['create_mysql'].outputs['username'] }"
+      password: "#{ #steps['create_mysql'].outputs['password'] }"
+      sql: "SELECT * FROM l3_assert_test WHERE score >= 90"
+      assert_mode: "row_count_gte"
+      expected_min: 2
+    timeout_seconds: 15
+
+  # Step 6: Assert value_equals (Alice's score = 95)
+  - id: "assert_value"
+    action: "assert_jdbc_data"
+    inputs:
+      jdbc_url: "#{ #steps['create_mysql'].outputs['jdbc_url'] }"
+      username: "#{ #steps['create_mysql'].outputs['username'] }"
+      password: "#{ #steps['create_mysql'].outputs['password'] }"
+      sql: "SELECT score FROM l3_assert_test WHERE name = 'Alice'"
+      assert_mode: "value_equals"
+      column: "score"
+      expected: 95
+    timeout_seconds: 15
+
+  # Step 7: DELETE all, then assert empty with polling
+  - id: "delete_all"
+    action: "dbforge_execute_sql"
+    inputs:
+      jdbc_url: "#{ #steps['create_mysql'].outputs['jdbc_url'] }"
+      username: "#{ #steps['create_mysql'].outputs['username'] }"
+      password: "#{ #steps['create_mysql'].outputs['password'] }"
+      sql: "DELETE FROM l3_assert_test"
+    timeout_seconds: 15
+
+  - id: "assert_empty_with_poll"
+    action: "assert_jdbc_data"
+    inputs:
+      jdbc_url: "#{ #steps['create_mysql'].outputs['jdbc_url'] }"
+      username: "#{ #steps['create_mysql'].outputs['username'] }"
+      password: "#{ #steps['create_mysql'].outputs['password'] }"
+      sql: "SELECT * FROM l3_assert_test"
+      assert_mode: "empty"
+      poll_interval: 1
+      max_attempts: 5
+    timeout_seconds: 15
