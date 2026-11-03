@@ -3,6 +3,7 @@ package io.tapdata.it.l3.plugin;
 import io.tapdata.it.l3.common.ScenarioContext;
 import io.tapdata.it.l3.common.StepConfig;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
@@ -17,6 +18,9 @@ import java.util.List;
  * <pre>
  *   new ActionClass()                      ← 反射实例化（必须有无参构造器）
  *       │
+ *       ├─ validate(StepConfig)            ← 【新增】框架执行前并发调用所有 step 的 validate，
+ *       │                                     收集所有错误后统一报告（不进入 before/execute）
+ *       │
  *       ├─ init()                          ← 实例创建后立即调用（一次）
  *       │
  *       └─ execute(StepConfig, ScenarioContext)   ← 每个 step 调用一次
@@ -27,7 +31,11 @@ import java.util.List;
  *                  └─ destroy()           ← 整个 Scenario 结束时调用（所有 action 的 destroy 都触发）
  * </pre>
  * <p>
- * 四个生命周期钩子默认实现都是空操作 — 子类按需覆盖。
+ * 五个生命周期钩子（init/before/after/destroy/validate）默认实现都是空操作 — 子类按需覆盖。
+ * <p>
+ * <b>校验设计（validate）</b>：宽松式校验 — 只检查必填项和类型合法性，允许用户声明额外参数。
+ * 返回 {@code List<String>}，空列表表示 OK，每个元素是一个人类可读的失败原因（建议带改正说明）。
+ * 框架会并发调用所有 step 的 validate，收集所有错误后一次性报告给用户。
  * <p>
  * The {@link #getRuntimeDependencies()} hook lets a step declare which additional Maven
  * coordinates it needs at runtime (e.g. a custom JDBC driver). PluginCenter collects these
@@ -53,6 +61,38 @@ public interface ActionHandler {
     void execute(StepConfig config, ScenarioContext context) throws Exception;
 
     // ==================== 生命周期钩子 (默认空实现，按需覆盖) ====================
+
+    /**
+     * 【新增】框架执行前的宽松式配置校验 —— 允许用户声明额外参数，只报告必填缺失/类型错误。
+     * <p>
+     * 框架在 ScenarioRunner.execute() 最开始、before/init/execute 之前，
+     * 对所有 step **并发**调用此方法，收集所有错误后一次性报告给用户 ——
+     * 避免执行到一半才发现配置错误导致已完成的 step 副作用需要回滚。
+     * <p>
+     * 默认实现检查 {@code inputs} 里的值类型（Number/String/Boolean/Map/List）是否合法，
+     * 并允许子类覆盖添加必填项校验。子类校验逻辑示例：
+     * <pre>{@code
+     * @Override
+     * public List<String> validate(StepConfig config) {
+     *     List<String> errors = new ArrayList<>(super.validate(config));
+     *     Map<String, Object> inputs = config.getInputs();
+     *     if (isBlank((String) inputs.get("url")))
+     *         errors.add("[tm_login] 缺少必填项 'url' — 请填 TM agent 地址如 http://127.0.0.1:3030");
+     *     if (isBlank((String) inputs.get("access_code")))
+     *         errors.add("[tm_login] 缺少必填项 'access_code' — 在 TM 控制台 API 密钥页面获取");
+     *     return errors;
+     * }
+     * }</pre>
+     * <p>
+     * 返回 {@code null} 等价于返回空列表（无错误）。错误消息应包含 action 名、参数名、
+     * 当前值类型/实际值、改正建议 —— 方便用户快速定位修复。
+     *
+     * @param config StepConfig（只调用一次，此时 {@code stepClassLoader} 已注入、inputs 未求值）
+     * @return 错误列表，空列表或 null 表示 OK
+     */
+    default List<String> validate(StepConfig config) {
+        return null;
+    }
 
     /**
      * 实例创建后立即调用 — 只执行一次。

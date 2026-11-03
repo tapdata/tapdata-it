@@ -126,13 +126,16 @@ public class DbforgeClient {
         JsonNode resp = post("/v1/leases", body);
         LeaseResult lease = LeaseResult.fromJson(resp);
 
-        // Rewrite internal host → public host for external connectivity
+        // Always keep the original internal host — TM agents inside K8s need this
+        lease.internalHost = lease.host;
+
+        // Rewrite internal host → public host for external connectivity (L3 runner)
         if (lease.host != null && !lease.host.equals(publicHost)) {
             String internalHost = lease.host;
             lease.host = publicHost;
             if (lease.jdbcUrl != null) lease.jdbcUrl = rewriteHost(lease.jdbcUrl, internalHost);
             if (lease.uri != null) lease.uri = rewriteHost(lease.uri, internalHost);
-            log.info("[DBForge] Rewrote DB host {} → {} (NodePort on control plane)", internalHost, publicHost);
+            log.info("[DBForge] Rewrote DB host {} → {} (NodePort on control plane, internal preserved as internalHost)", internalHost, publicHost);
         }
 
         return lease;
@@ -167,7 +170,7 @@ public class DbforgeClient {
                 .header("Authorization", "Bearer " + token)
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(json))
-                .timeout(Duration.ofSeconds(30))
+                .timeout(Duration.ofSeconds(120))
                 .build();
         HttpResponse<String> resp = http.send(req, HttpResponse.BodyHandlers.ofString());
         if (resp.statusCode() >= 300) {
@@ -187,7 +190,8 @@ public class DbforgeClient {
         public String dbType;
         public String mode;
         public String topology;
-        public String host;
+        public String host;          // Public host (for external clients like L3 runner)
+        public String internalHost;  // Original internal host (for TM agents inside K8s)
         public int port;
         public String database;
         public String username;
@@ -203,6 +207,7 @@ public class DbforgeClient {
             m.put("jdbc_url", jdbcUrl);
             m.put("uri", uri);
             m.put("host", host);
+            m.put("internal_host", internalHost);
             m.put("port", port);
             m.put("database", database);
             m.put("username", username);

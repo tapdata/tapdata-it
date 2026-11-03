@@ -41,7 +41,7 @@ public class TmClient {
     private static final long REFRESH_BUFFER_MS = 60_000L;
 
     /** Default TM for L3 IT environments — can be overridden via config/env/property. */
-    private static final String DEFAULT_URL = "http://113.98.206.140:24021";
+    private static final String DEFAULT_URL = "http://192.168.1.190:24021";
     private static final String DEFAULT_ACCESS_CODE = "3324cfdf-7d3e-4792-bd32-571638d4562f";
 
     private final String baseUrl;
@@ -150,6 +150,38 @@ public class TmClient {
         return send("PUT", path, queryParams, body);
     }
 
+    /** PATCH {path} with JSON body. 使用 curl 子进程因为 Java HttpClient PATCH 有请求体丢失的 bug，且 PluginClassLoader 隔离导致无法引入 OkHttp. */
+    public JsonNode patch(String path, Object body) throws IOException, InterruptedException {
+        String token = getToken();
+        String url = buildUrl(path, token, null);
+        String jsonBody = MAPPER.writeValueAsString(body);
+        log.debug("[TM] >>> PATCH {} body={}", url, jsonBody);
+
+        // 使用 curl 子进程 — 这是唯一在 PluginClassLoader 隔离下可靠发送 PATCH 的方式
+        ProcessBuilder pb = new ProcessBuilder("curl", "-s", "-X", "PATCH",
+                "-H", "Content-Type: application/json",
+                "-H", "Authorization: Bearer " + token,
+                "-d", jsonBody,
+                url);
+        pb.redirectErrorStream(true);
+        Process p = pb.start();
+        String respBody = new String(p.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        int exitCode = p.waitFor();
+
+        if (exitCode != 0) {
+            throw new IOException("curl PATCH failed (exit=" + exitCode + "): " + respBody);
+        }
+        log.debug("[TM] <<< PATCH {} body={}", url, respBody.length() > 300 ? respBody.substring(0, 300) + "..." : respBody);
+
+        JsonNode root = MAPPER.readTree(respBody);
+        String respCode = root.has("code") ? root.get("code").asText() : "";
+        if (!"ok".equals(respCode)) {
+            String msg = root.has("message") ? root.get("message").asText() : respBody;
+            throw new IOException("TM API error on " + path + ": code=" + respCode + ", message=" + msg);
+        }
+        return root.has("data") ? root.get("data") : root;
+    }
+
     /** DELETE {path} with optional query params. */
     public JsonNode delete(String path, Map<String, Object> queryParams) throws IOException, InterruptedException {
         return send("DELETE", path, queryParams, null);
@@ -174,15 +206,19 @@ public class TmClient {
 
         if (body != null) {
             reqBuilder.header("Content-Type", "application/json");
-            reqBuilder.method(method,
-                    HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body)));
+            String jsonBody = MAPPER.writeValueAsString(body);
+            log.debug("[TM] >>> {} {} body={}", method, url, jsonBody);
+            reqBuilder.method(method, HttpRequest.BodyPublishers.ofString(jsonBody));
         } else {
+            log.debug("[TM] >>> {} {}", method, url);
             reqBuilder.method(method, HttpRequest.BodyPublishers.noBody());
         }
 
-        log.debug("[TM] {} {}", method, url);
-        HttpResponse<String> resp = http.send(reqBuilder.timeout(Duration.ofSeconds(30)).build(),
+        // 120s 超时 — re-schemas 等接口需要去数据源加载 schema，比较慢
+        HttpResponse<String> resp = http.send(reqBuilder.timeout(Duration.ofSeconds(120)).build(),
                 HttpResponse.BodyHandlers.ofString());
+
+        log.debug("[TM] <<< {} {} → {} body={}", method, url, resp.statusCode(), resp.body().length() > 300 ? resp.body().substring(0, 300) + "..." : resp.body());
 
         if (resp.statusCode() >= 300) {
             throw new IOException("TM HTTP " + resp.statusCode() + " on " + url + ": " + resp.body());
@@ -236,6 +272,100 @@ public class TmClient {
 
     private static String encode(String s) {
         return URLEncoder.encode(s, StandardCharsets.UTF_8);
+    }
+
+    // ==================== Debug / Diagnostic helpers ====================
+
+    /**
+     * Dump task milestone progression + key status fields for debugging.
+     * 使用场景: wait_task 超时或 task 到 error 终态时调用, 快速定位哪个阶段失败.
+     */
+    public String dumpTask(String taskId) {
+        try {
+            JsonNode task = get("/api/Task/" + taskId);
+            StringBuilder sb = new StringBuilder();
+            sb.append(String.format("Task [%s] %s:\n", taskId, text(task, "name")));
+            sb.append(String.format("  flowStatus=%s, status=%s, agentId=%s\n",
+                    text(task, "flowStatus"), text(task, "status"), text(task, "agentId")));
+
+            // Milestone — 最有用的诊断信息
+            JsonNode milestone = task.path("attrs").path("milestone");
+            if (milestone.isObject()) {
+                sb.append("  Milestones:\n");
+                milestone.fields().forEachRemaining(entry -> {
+                    String stage = entry.getKey();
+                    JsonNode info = entry.getValue();
+                    String status = text(info, "status");
+                    String errorCode = text(info, "errorCode");
+                    String errorMsg = text(info, "errorMessage");
+                    sb.append(String.format("    %s: status=%s, errorCode=%s, errorMsg=%s\n",
+                            stage, status, errorCode,
+                            errorMsg != null && errorMsg.length() > 200 ? errorMsg.substring(0, 200) + "..." : errorMsg));
+                });
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "Failed to dump task " + taskId + ": " + e.getMessage();
+        }
+    }
+
+    /** Dump Inspect detail — 帮助排查校验失败/超时. */
+    public String dumpInspect(String inspectId) {
+        try {
+            JsonNode insp = get("/api/Inspects/find/" + inspectId);
+            StringBuilder sb = new StringBuilder();
+            sb.append(String.format("Inspect [%s] %s:\n", inspectId, text(insp, "name")));
+            sb.append(String.format("  status=%s, result=%s, agentId=%s, agentTags=%s\n",
+                    text(insp, "status"), text(insp, "result"),
+                    text(insp, "agentId"), insp.path("agentTags")));
+            String err = text(insp, "errorMsg");
+            if (err != null) {
+                sb.append("  errorMsg: ").append(err.length() > 500 ? err.substring(0, 500) + "..." : err).append("\n");
+            }
+            JsonNode tasks = insp.path("tasks");
+            if (tasks.isArray()) {
+                sb.append(String.format("  Tasks (%d):\n", tasks.size()));
+                tasks.forEach(t -> {
+                    sb.append(String.format("    src=%s→tgt=%s: result=%s\n",
+                            t.path("source").path("table").asText("?"),
+                            t.path("target").path("table").asText("?"),
+                            t.path("result").asText("?")));
+                });
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "Failed to dump inspect " + inspectId + ": " + e.getMessage();
+        }
+    }
+
+    /** Dump Connection detail — 帮助排查连接测试失败. */
+    public String dumpConnection(String connId) {
+        try {
+            JsonNode conn = get("/api/Connections/" + connId);
+            StringBuilder sb = new StringBuilder();
+            sb.append(String.format("Connection [%s] %s:\n", connId, text(conn, "name")));
+            sb.append(String.format("  databaseType=%s, status=%s, accessNodeType=%s, accessNodeProcessId=%s\n",
+                    text(conn, "databaseType"), text(conn, "status"),
+                    text(conn, "accessNodeType"), text(conn, "accessNodeProcessId")));
+            // Alarm info
+            JsonNode alarms = conn.path("alarmInfos");
+            if (alarms.isArray() && alarms.size() > 0) {
+                sb.append("  Alarms:\n");
+                alarms.forEach(a -> sb.append("    ").append(a).append("\n"));
+            }
+            JsonNode attrs = conn.path("attrs");
+            if (!attrs.isMissingNode()) {
+                sb.append("  attrs.loadFieldsStatus=").append(text(attrs, "loadFieldsStatus")).append("\n");
+                sb.append("  attrs.tableCount=").append(text(attrs, "tableCount")).append("\n");
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            return "Failed to dump connection " + connId + ": " + e.getMessage();
+        }
+    }
+
+    private static String text(JsonNode n, String key) {
+        return n != null && n.has(key) && !n.get(key).isNull() ? n.get(key).asText() : null;
     }
 
     private record CachedToken(String token, long expiresAt) {}

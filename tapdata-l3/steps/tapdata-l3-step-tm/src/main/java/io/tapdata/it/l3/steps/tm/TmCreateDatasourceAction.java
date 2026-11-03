@@ -103,16 +103,22 @@ public class TmCreateDatasourceAction extends BaseStep {
         String connectionType = p.getConnectionType();
 
         // Build flat request body (matches DataSourceConnectionDto)
+        // pdkType is CRITICAL — engine's TestConnectionHandler throws
+        // "Unknown connection pdk type" when pdkType is null (only "pdk" is valid)
+        // Also matches browser frontend DatabaseForm.vue payload exactly
         Map<String, Object> body = new HashMap<>();
         body.put("name", p.getName());
         body.put("database_type", p.getDatabaseType());
         body.put("pdkHash", pdkHash);
+        body.put("pdkType", "pdk");                       // REQUIRED — engine validates this
         body.put("connection_type", connectionType);
         body.put("database_host", p.getDatabaseHost());
         body.put("database_port", p.getDatabasePort());
         body.put("database_username", p.getDatabaseUsername());
         body.put("database_password", p.getDatabasePassword());
         body.put("database_name", p.getDatabaseName());
+        body.put("submit", true);                         // trigger async connection test
+        body.put("status", "testing");                    // match browser state
 
         // Build PDK config JSON (nested)
         Map<String, Object> pdkConfig = new LinkedHashMap<>();
@@ -129,6 +135,13 @@ public class TmCreateDatasourceAction extends BaseStep {
             pdkConfig.putAll(rawConfig);
         }
         body.put("config", pdkConfig);
+
+        // Optional: 指定 agent — 和 Task 一致使用 tapsupertest5 才能连上 dbforge MySQL
+        if (p.getAgentId() != null && !p.getAgentId().isBlank()) {
+            body.put("accessNodeType", "MANUALLY_SPECIFIED_BY_THE_USER");
+            body.put("accessNodeProcessId", p.getAgentId());
+            log.info("[TM] Datasource will use agent: {}", p.getAgentId());
+        }
 
         log.info("[TM] Creating Connection '{}' (type={}, pdkHash={})", p.getName(), p.getDatabaseType(), pdkHash);
         JsonNode resp = client.post("/api/Connections", body);

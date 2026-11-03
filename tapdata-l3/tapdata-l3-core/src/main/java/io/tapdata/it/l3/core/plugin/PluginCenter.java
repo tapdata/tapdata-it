@@ -1,5 +1,6 @@
 package io.tapdata.it.l3.core.plugin;
 
+import io.tapdata.it.l3.common.StepConfig;
 import io.tapdata.it.l3.plugin.ActionHandler;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -20,7 +21,7 @@ import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.file.Path;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.*;
 
 /**
  * 插件中心：tapdata-l3-core 对外暴露的**唯一 Step 获取门面**。
@@ -53,10 +54,31 @@ public class PluginCenter {
 
     private static final Logger log = LoggerFactory.getLogger(PluginCenter.class);
 
-    /** 统一注册表：actionName → ActionHandler 实例。ConcurrentHashMap 保证并行 Step 安全。 */
-    private final Map<String, ActionHandler> registry = new ConcurrentHashMap<>();
+    /**
+     * 统一注册表：actionName → ActionHandlerPrototype。
+     * <p>
+     * Prototype 模式 —— 只存 (Class, ClassLoader)，**不存实例**。每次 `getOrLoadAction` / `getAction`
+     * 都通过 prototype 反射 `tryInstantiate` 返回**新实例**。
+     * <p>
+     * 这样 DSL 里同一个 action 被多个 step 引用时，每个 step 都拿到独立的 handler 实例，
+     * 不会出现跨 step 的状态污染（连接池、临时文件句柄、计数器等）。
+     *
+     * @see #tryInstantiateInCL
+     */
+    private final Map<String, ActionHandlerPrototype> registry = new ConcurrentHashMap<>();
 
-    /** actionName → URLClassLoader，记录每个已注册 handler 所在的 classloader。 */
+    /**
+     * 内部 prototype 记录 — 存 (Class, ClassLoader, runtimeDeps) 元信息，让每次 getOrLoadAction
+     * 都能 new 新实例。runtimeDeps 在 registerInternal 时用临时实例调 getRuntimeDependencies() 拿到。
+     * 这里用 record 是因为它天然不可变，ConcurrentHashMap 里存 record 安全。
+     */
+    private record ActionHandlerPrototype(
+            Class<? extends ActionHandler> clazz,
+            ClassLoader classLoader,
+            List<String> runtimeDeps   // handler 内置声明的 runtime deps（不可变副本）
+    ) {}
+
+    /** actionName → URLClassLoader，记录每个已注册 handler 所在的 classloader。兼容旧 API {@link #getClassLoaderFor}。 */
     private final Map<String, URLClassLoader> classLoaders = new ConcurrentHashMap<>();
 
     /**
@@ -69,6 +91,15 @@ public class PluginCenter {
      * 内置 Step 和 PF4J legacy 插件不进这个缓存（它们的 CL 由 Spring / PF4J 自己管理）。
      */
     private final Map<String, URLClassLoader> coordinateCache = new ConcurrentHashMap<>();
+
+    /**
+     * per-coordinate 加载锁 —— 确保同一个 Maven coordinate 在并发 loadPlugin 时只被一个线程下载+扫描一次。
+     * 其他线程等持锁线程完成后复用 coordinateCache 里的结果。
+     * <p>
+     * 锁对象本身是短生命周期的：entry 在持锁线程完成 loadPlugin 后从 Map 里 remove，
+     * 避免 Map 无限增长。
+     */
+    private final Map<String, Object> loadPluginLocks = new ConcurrentHashMap<>();
 
     /**
      * actionName → 该 action 已加载的 deps 坐标集合。
@@ -99,10 +130,26 @@ public class PluginCenter {
     /** 配置。 */
     private final PluginCenterProperties properties;
 
+    /**
+     * 下载线程池 —— 用于 getOrLoadAction / loadPlugin 的并发 JAR 下载。
+     * 大小 = properties.getDownloadConcurrency()，与 MavenPluginResolver.downloadPool 独立但大小相同。
+     */
+    private final ExecutorService actionLoadPool;
+
     public PluginCenter(PluginCenterProperties properties) {
         this.properties = properties;
         this.mavenResolver = new MavenPluginResolver(
-                properties.getLocalRepoDir(), properties.getNexusUrl());
+                properties.getLocalRepoDir(), properties.getRemoteRepos(),
+                properties.getDownloadConcurrency());
+
+        // action 下载并发线程池 —— 与 MavenPluginResolver 独立但大小相同
+        int c = Math.max(1, properties.getDownloadConcurrency());
+        this.actionLoadPool = Executors.newFixedThreadPool(c, r -> {
+            Thread t = new Thread(r, "l3-action-load");
+            t.setDaemon(true);
+            return t;
+        });
+        log.info("[PluginCenter] actionLoadPool created (concurrency={})", c);
 
         Path pluginsDir = Path.of(properties.getPluginsDir());
         try {
@@ -125,11 +172,17 @@ public class PluginCenter {
      * @throws IllegalArgumentException 如果 action 未注册
      */
     public ActionHandler getAction(String actionName) {
-        ActionHandler handler = registry.get(actionName);
-        if (handler == null) {
+        ActionHandlerPrototype proto = registry.get(actionName);
+        if (proto == null) {
             throw new IllegalArgumentException(String.format(
                     "Step not found: '%s'. Available: %s | Default registry: %s",
                     actionName, registry.keySet(), defaultRegistry.keySet()));
+        }
+        ActionHandler handler = tryInstantiateInCL(proto);
+        if (handler == null) {
+            throw new IllegalStateException(String.format(
+                    "Step '%s' registered but failed to instantiate (no public no-arg constructor or CL issue)",
+                    actionName));
         }
         return handler;
     }
@@ -165,17 +218,27 @@ public class PluginCenter {
                     explicitCoord == null && defaultRegistry.containsKey(actionName));
             loadPlugin(coordinate);
 
-            ActionHandler handler = registry.get(actionName);
-            if (handler == null) {
+            ActionHandlerPrototype proto = registry.get(actionName);
+            if (proto == null) {
                 throw new PluginLoadException(
                         "Jar " + coordinate + " loaded but still no action '" + actionName + "' registered");
+            }
+            ActionHandler handler = tryInstantiateInCL(proto);
+            if (handler == null) {
+                throw new PluginLoadException(
+                        "Action '" + actionName + "' registered but failed to instantiate from CL");
             }
             return handler;
         }
 
-        // 3. 最后回落到内置 / 已加载
-        ActionHandler handler = registry.get(actionName);
-        if (handler != null) return handler;
+        // 3. 最后回落到内置 / 已加载 — 每次 new 新实例
+        ActionHandlerPrototype proto = registry.get(actionName);
+        if (proto != null) {
+            ActionHandler handler = tryInstantiateInCL(proto);
+            if (handler != null) return handler;
+            throw new PluginLoadException(
+                    "Action '" + actionName + "' registered but failed to instantiate from CL");
+        }
 
         throw new PluginLoadException(String.format(
                 "Step '%s' 未找到。既不是内置 step，也没在 DSL 里指定 use，默认注册表也没有。"
@@ -198,23 +261,182 @@ public class PluginCenter {
         return Map.copyOf(defaultRegistry);
     }
 
-    /** 列出所有已注册 Step（内置 + 已懒加载的外置）。 */
-    public Map<String, ActionHandler> getAllActions() {
-        return Map.copyOf(new LinkedHashMap<>(registry));
+    /** 列出所有已注册 Step — 返回 actionName → handler Class（prototype 元信息）。 */
+    public Map<String, Class<? extends ActionHandler>> getAllActions() {
+        Map<String, Class<? extends ActionHandler>> result = new LinkedHashMap<>();
+        for (Map.Entry<String, ActionHandlerPrototype> e : registry.entrySet()) {
+            result.put(e.getKey(), e.getValue().clazz());
+        }
+        return result;
+    }
+
+    // ==================== 依赖预加载 Preflight ====================
+
+    /**
+     * 【新增】统一预加载所有 step 的 Maven 依赖（jar + runtime deps + 传递依赖），打印进度，
+     * 避免运行到一半才因网络问题或 artifact 缺失失败。
+     * <p>
+     * 执行顺序：
+     * <ol>
+     *   <li>收集所有 unique action + 每个 action 的 merged extraDeps + 显式 {@code use} 坐标</li>
+     *   <li>对每个 action 触发 {@link #getOrLoadAction}（下载 jar + 注册 handler）</li>
+     *   <li>合并所有 handler.getRuntimeDependencies() + DSL extraDeps → 一次性 {@link MavenPluginResolver#resolveWithDependencies}（批量下载传递依赖）</li>
+     *   <li>对每个已加载 action 调 {@link #addRuntimeDependencies}，重建 classloader 注入全部 deps</li>
+     * </ol>
+     *
+     * @param steps 本次要执行的所有 StepConfig（会从里面收集 action / extraDeps / use）
+     * @throws PluginLoadException 任何一个 action 或 dep 下载失败即中断（fail-fast 语义）
+     */
+    public void preloadDependencies(Collection<StepConfig> steps) throws PluginLoadException {
+        if (steps == null || steps.isEmpty()) {
+            log.info("[Preload] No steps to preload.");
+            return;
+        }
+
+        // 1. 收集 unique action + 每个 action 的 merged extraDeps + explicitCoord
+        Map<String, PreloadStepInfo> toLoad = new LinkedHashMap<>();
+        for (StepConfig s : steps) {
+            if (s == null || s.getAction() == null || s.getAction().isBlank()) continue;
+            PreloadStepInfo info = toLoad.computeIfAbsent(s.getAction(),
+                    a -> new PreloadStepInfo(a, s.getUse()));
+            if (s.getExtraDeps() != null) info.extraDeps.addAll(s.getExtraDeps());
+        }
+
+        List<String> errors = new ArrayList<>();
+        int jarFreshDownload = 0, jarCached = 0;
+
+        // 2. 并发触发 getOrLoadAction（每个 action 一个 CompletableFuture）
+        log.info("[Preload] Preloading {} unique step action(s) with {} threads...",
+                toLoad.size(), properties.getDownloadConcurrency());
+
+        List<CompletableFuture<Void>> actionFutures = new ArrayList<>();
+        for (PreloadStepInfo info : toLoad.values()) {
+            CompletableFuture<Void> f = CompletableFuture.runAsync(() -> {
+                boolean wasLoaded = registry.containsKey(info.action);
+                boolean inRegistry = isInDefaultRegistry(info.action);
+                log.info("[Preload] ▶ action={} (builtin={}, registry={}, use={})",
+                        info.action, wasLoaded, inRegistry,
+                        info.explicitCoord != null ? "yes" : "no");
+                try {
+                    ActionHandler handler = getOrLoadAction(info.action, info.explicitCoord);
+                    if (!wasLoaded) info.freshDownload = true;
+                    else info.freshDownload = false;
+                    info.handler = handler;
+                    log.info("[Preload]   ✅ {} → {} (jar ready)", info.action,
+                            handler.getClass().getSimpleName());
+                } catch (PluginLoadException e) {
+                    synchronized (errors) {
+                        errors.add(String.format("action '%s': %s", info.action, e.getMessage()));
+                    }
+                    log.error("[Preload]   ❌ {} → load failed: {}", info.action, e.getMessage());
+                }
+            }, actionLoadPool);
+            actionFutures.add(f);
+        }
+
+        // 等待所有 action 完成（任意一个失败不影响其他 — 都跑完再统一报告）
+        try {
+            CompletableFuture.allOf(actionFutures.toArray(new CompletableFuture[0])).join();
+        } catch (CompletionException ignored) {
+            // 已经在 future 内部收集了错误，这里只需要等所有 future 完成
+        }
+
+        for (PreloadStepInfo info : toLoad.values()) {
+            if (info.handler != null) {
+                if (info.freshDownload) jarFreshDownload++;
+                else jarCached++;
+            }
+        }
+
+        // 3. 合并所有 runtime deps → 一次性批量 resolve（含传递依赖）
+        Set<String> allRuntimeDeps = new LinkedHashSet<>();
+        for (PreloadStepInfo info : toLoad.values()) {
+            if (info.handler != null) {
+                allRuntimeDeps.addAll(info.handler.getRuntimeDependencies());
+                allRuntimeDeps.addAll(info.extraDeps);
+            }
+        }
+
+        int runtimeJarCount = 0;
+        if (!allRuntimeDeps.isEmpty()) {
+            log.info("[Preload] Resolving {} unique runtime dep coord(s) (including transitive): {}",
+                    allRuntimeDeps.size(), allRuntimeDeps);
+            try {
+                List<java.nio.file.Path> jars = mavenResolver.resolveWithDependencies(List.copyOf(allRuntimeDeps));
+                runtimeJarCount = jars.size();
+                for (java.nio.file.Path p : jars) {
+                    log.info("[Preload]   📦 {}", p.getFileName());
+                }
+            } catch (MavenPluginResolver.ResolutionException e) {
+                errors.add("runtime-deps: " + e.getMessage());
+                log.error("[Preload]   ❌ runtime deps resolution failed: {}", e.getMessage());
+            }
+        } else {
+            log.info("[Preload] No runtime dependencies declared.");
+        }
+
+        // 4. 对每个已成功加载的 action 重建 classloader（注入全部 runtime deps）
+        for (PreloadStepInfo info : toLoad.values()) {
+            if (info.handler == null) continue;
+            try {
+                addRuntimeDependencies(info.action, List.copyOf(info.extraDeps));
+            } catch (PluginLoadException e) {
+                errors.add(String.format("action '%s' runtime deps: %s", info.action, e.getMessage()));
+            }
+        }
+
+        // 5. 汇总报告
+        log.info("================================================================");
+        log.info("[Preload] Summary:");
+        log.info("  📥 Fresh JAR downloads : {}", jarFreshDownload);
+        log.info("  ♻️  Cached JARs (builtin): {}", jarCached);
+        log.info("  📦 Runtime dep JARs    : {} ({} unique coords)", runtimeJarCount, allRuntimeDeps.size());
+        log.info("  ❌ Errors              : {}", errors.size());
+        log.info("================================================================");
+
+        if (!errors.isEmpty()) {
+            StringBuilder sb = new StringBuilder("[Preload] ").append(errors.size())
+                    .append(" error(s) during dependency preload:\n");
+            for (int i = 0; i < errors.size(); i++) {
+                sb.append("  [E").append(i + 1).append("] ").append(errors.get(i)).append('\n');
+            }
+            throw new PluginLoadException(sb.toString().trim());
+        }
+    }
+
+    /** Preload 内部辅助 — 聚合每个 action 所有 step 的信息。 */
+    private static class PreloadStepInfo {
+        final String action;
+        final String explicitCoord;
+        final Set<String> extraDeps = new LinkedHashSet<>();
+        ActionHandler handler;
+        boolean freshDownload;  // true = 本次 preload 新下载, false = 之前已缓存/内置
+
+        PreloadStepInfo(String action, String explicitCoord) {
+            this.action = action;
+            this.explicitCoord = explicitCoord;
+        }
     }
 
     /**
-     * 触发所有已注册 handler 的 {@link ActionHandler#destroy()} —— 整个 Scenario 结束时调用。
+     * 对**传入的 handler 实例集合**逐个调 destroy() —— ScenarioRunner 在 scenario 结束时收集所有
+     * step 用过的 handler 独立实例，统一销毁。
      * <p>
-     * 遍历 registry.values()，按注册顺序依次调 destroy()，单个 handler 抛异常不影响其他。
+     * 不再遍历 registry（registry 现在存 prototype 不是实例）。每个 scenario 结束时的 handler 都是
+     * getOrLoadAction 反射 new 的独立实例，各自有各自的 initDone 状态。
+     *
+     * @param handlers 本次 scenario 执行过的所有 handler 实例（去重后）
      */
-    public void destroyAllHandlers() {
-        for (Map.Entry<String, ActionHandler> e : registry.entrySet()) {
+    public void destroyAllHandlers(Collection<ActionHandler> handlers) {
+        if (handlers == null) return;
+        Set<ActionHandler> seen = new HashSet<>();
+        for (ActionHandler h : handlers) {
+            if (h == null || !seen.add(h)) continue;
             try {
-                e.getValue().destroy();
-                log.debug("[PluginCenter] destroy() → {}", e.getKey());
+                h.destroy();
             } catch (Exception ex) {
-                log.warn("[PluginCenter] destroy() failed for '{}': {}", e.getKey(), ex.getMessage());
+                log.warn("[PluginCenter] destroy() failed for instance of '{}': {}",
+                        h.getActionName(), ex.getMessage());
             }
         }
     }
@@ -229,18 +451,16 @@ public class PluginCenter {
      * @return 第一个成功注册的 ActionHandler（调用方可按需再从 registry 拿其他已注册的）
      */
     public ActionHandler loadPlugin(String coordinate) throws PluginLoadException {
-        URLClassLoader cl;
-
-        // --- CL 缓存命中 → 直接扫描注册 ---
+        // --- Fast path: CL 缓存命中 → 直接扫描注册（无锁，ConcurrentHashMap 本身线程安全）---
         if (coordinateCache.containsKey(coordinate)) {
-            cl = coordinateCache.get(coordinate);
+            URLClassLoader cl = coordinateCache.get(coordinate);
             log.info("[PluginCenter] Coordinate {} already cached, scanning handlers...", coordinate);
             List<ActionHandler> handlers = findAllAndInstantiate(cl);
             if (handlers.isEmpty()) {
                 log.warn("[PluginCenter] Cached CL for {} has no usable ActionHandler, evicting cache", coordinate);
                 try { cl.close(); } catch (Exception ignored) { }
                 coordinateCache.remove(coordinate);
-                // Fall through to re-download below
+                // Fall through — 进入慢速路径（会拿 coordinate 锁）
             } else {
                 for (ActionHandler h : handlers) {
                     registerInternal(h, cl, "maven-cached:" + coordinate);
@@ -249,36 +469,56 @@ public class PluginCenter {
             }
         }
 
-        // --- 缓存未命中：正常下载 + 构建 ---
-        // 只用 resolveArtifact 拿直接 jar —— 传递依赖（Jackson/SLF4J 等）通过宿主 fat jar 的 parent CL 找。
-        // 这样跳过慢速的 collectDependencies（要验证所有传递 pom 的远端可用性），秒级完成。
-        log.info("[PluginCenter] Loading JAR plugin from Maven coord: {}", coordinate);
-        try {
-            Path jarPath = mavenResolver.resolveArtifact(coordinate);
-            URL[] urls = new URL[] { jarPath.toUri().toURL() };
+        // --- Slow path: 拿 per-coordinate 锁，避免同一个坐标被多线程重复下载 + 扫描 ---
+        Object lock = loadPluginLocks.computeIfAbsent(coordinate, k -> new Object());
+        synchronized (lock) {
+            try {
+                // double-check: 持锁后再看一次缓存（可能在等锁期间被别的线程完成了）
+                if (coordinateCache.containsKey(coordinate)) {
+                    URLClassLoader cl = coordinateCache.get(coordinate);
+                    List<ActionHandler> handlers = findAllAndInstantiate(cl);
+                    if (!handlers.isEmpty()) {
+                        for (ActionHandler h : handlers) {
+                            registerInternal(h, cl, "maven-cached:" + coordinate);
+                        }
+                        return handlers.get(0);
+                    }
+                    // 缓存条目仍然空 handler — 说明之前的 CL 有问题，清掉重建
+                    coordinateCache.remove(coordinate);
+                }
 
-            cl = new PluginClassLoader(urls, Thread.currentThread().getContextClassLoader());
-            coordinateCache.put(coordinate, cl);
+                log.info("[PluginCenter] Loading JAR plugin from Maven coord: {}", coordinate);
+                try {
+                    Path jarPath = mavenResolver.resolveArtifact(coordinate);
+                    URL[] urls = new URL[] { jarPath.toUri().toURL() };
 
-            List<ActionHandler> handlers = findAllAndInstantiate(cl);
-            if (handlers.isEmpty()) {
-                coordinateCache.remove(coordinate);
-                try { cl.close(); } catch (Exception ignored) { }
-                throw new PluginLoadException(
-                        "No ActionHandler implementation found in plugin jar: " + coordinate
-                                + " (no META-INF/services entry, no concrete ActionHandler class with no-arg constructor)");
+                    URLClassLoader cl = new PluginClassLoader(urls, Thread.currentThread().getContextClassLoader());
+                    coordinateCache.put(coordinate, cl);
+
+                    List<ActionHandler> handlers = findAllAndInstantiate(cl);
+                    if (handlers.isEmpty()) {
+                        coordinateCache.remove(coordinate);
+                        try { cl.close(); } catch (Exception ignored) { }
+                        throw new PluginLoadException(
+                                "No ActionHandler implementation found in plugin jar: " + coordinate
+                                        + " (no META-INF/services entry, no concrete ActionHandler class with no-arg constructor)");
+                    }
+
+                    for (ActionHandler h : handlers) {
+                        registerInternal(h, cl, "maven:" + coordinate);
+                    }
+                    log.info("[PluginCenter] Loaded {} handler(s) from {} (direct jar, parent CL provides transitive deps)",
+                            handlers.size(), coordinate);
+                    return handlers.get(0);
+                } catch (MavenPluginResolver.ResolutionException e) {
+                    throw new PluginLoadException("Failed to resolve plugin from Maven: " + coordinate, e);
+                } catch (java.net.MalformedURLException e) {
+                    throw new PluginLoadException("Failed to build URL for plugin jar: " + coordinate, e);
+                }
+            } finally {
+                // 释放锁对象 —— 避免 Map 无限增长
+                loadPluginLocks.remove(coordinate, lock);
             }
-
-            for (ActionHandler h : handlers) {
-                registerInternal(h, cl, "maven:" + coordinate);
-            }
-            log.info("[PluginCenter] Loaded {} handler(s) from {} (direct jar, parent CL provides transitive deps)",
-                    handlers.size(), coordinate);
-            return handlers.get(0);
-        } catch (MavenPluginResolver.ResolutionException e) {
-            throw new PluginLoadException("Failed to resolve plugin from Maven: " + coordinate, e);
-        } catch (java.net.MalformedURLException e) {
-            throw new PluginLoadException("Failed to build URL for plugin jar: " + coordinate, e);
         }
     }
 
@@ -297,13 +537,13 @@ public class PluginCenter {
      * JVM 会自动 GC 掉没有被引用的旧 CL + 对应的旧类定义。
      */
     public int addRuntimeDependencies(String actionName, List<String> extraCoords) throws PluginLoadException {
-        ActionHandler handler = registry.get(actionName);
-        if (handler == null) {
+        ActionHandlerPrototype proto = registry.get(actionName);
+        if (proto == null) {
             throw new PluginLoadException("Action not found: " + actionName);
         }
 
-        // 合并 Step 自身声明 + DSL 传入
-        Set<String> merged = new LinkedHashSet<>(handler.getRuntimeDependencies());
+        // 合并 Step 自身声明（注册时存进 prototype 的 runtimeDeps）+ DSL 传入
+        Set<String> merged = new LinkedHashSet<>(proto.runtimeDeps());
         if (extraCoords != null) merged.addAll(extraCoords);
         if (merged.isEmpty()) return 0;
 
@@ -314,8 +554,10 @@ public class PluginCenter {
             return 0;
         }
 
-        // 1. 解析所有新增 deps —— 逐个 resolveArtifact 拿直接 jar（跳过慢速 collect）
-        //    传递依赖通过宿主 parent CL 或已有 deps CL 找
+        // 1. 逐个解析新增 deps —— 用 resolveArtifact 直接拿 jar（本地命中即返回，极速）。
+        //    对 JDBC driver 这类没有 compile-scope 传递依赖的 artifact 足够。
+        //    如需完整传递依赖图（resolveWithDependencies，慢 + 需远程 POM 校验），
+        //    请在 DSL YAML 里显式声明所有需要的 transitive 坐标。
         List<Path> newDeps = new ArrayList<>();
         for (String coord : merged) {
             try {
@@ -447,9 +689,8 @@ public class PluginCenter {
 
     @PostConstruct
     public void init() {
-        log.info("[PluginCenter] Initializing (pluginsDir={}, localRepo={}, nexus={})",
-                properties.getPluginsDir(), properties.getLocalRepoDir(),
-                properties.getNexusUrl() != null ? properties.getNexusUrl() : "(none)");
+        log.info("[PluginCenter] Initializing (pluginsDir={}, localRepo={}, remoteRepos={})",
+                properties.getPluginsDir(), properties.getLocalRepoDir(), properties.getRemoteRepos());
 
         // 1. 注册内置 Step —— 通过 classpath 扫描 ActionHandler 实现（零 Spring 注解依赖）
         int builtInCount = registerBuiltInHandlers();
@@ -527,7 +768,10 @@ public class PluginCenter {
         }
         classLoaders.clear();
 
-        // Maven Resolver session 不需要显式关闭
+        // Maven Resolver session 不需要显式关闭 —— 但下载线程池要关
+        actionLoadPool.shutdown();
+        try { actionLoadPool.awaitTermination(5, TimeUnit.SECONDS); } catch (InterruptedException ignored) { }
+        mavenResolver.shutdown();
         loadedDepsPerAction.clear();
         log.info("[PluginCenter] Shutdown complete (coordinateCache + loadedDepsPerAction cleared)");
     }
@@ -547,21 +791,35 @@ public class PluginCenter {
 
     /** 统一注册入口：同名冲突时后注册覆盖先注册。 */
     /**
-     * 内部注册 — 把 action 加到 registry + classLoaders。
+     * 内部注册 — 把 action 的 prototype (Class + ClassLoader) 加到 registry。
+     * <p>
+     * 注意：入参 {@code handler} 只用来拿 actionName + Class 对象 —— **不存这个实例**。
+     * 真正执行 step 时由 {@link #getOrLoadAction} / {@link #getAction} 反射 new 新实例。
+     * 这样每个 DSL step 都有独立的 handler 实例。
      *
      * @return true = 新注册成功, false = 覆盖了已有实现
      */
     private boolean registerInternal(ActionHandler handler, URLClassLoader cl, String source) {
         String actionName = handler.getActionName();
-        ActionHandler existing = registry.put(actionName, handler);
+        Class<? extends ActionHandler> clazz = handler.getClass();
+        ClassLoader handlerCL = cl != null ? cl : clazz.getClassLoader();
+
+        // 注册时顺手拿一下内置 runtime deps —— 用临时实例（handler 参数）调一次就好，存进 prototype
+        List<String> runtimeDeps = handler.getRuntimeDependencies() != null
+                ? List.copyOf(handler.getRuntimeDependencies())
+                : List.of();
+
+        ActionHandlerPrototype proto = new ActionHandlerPrototype(clazz, handlerCL, runtimeDeps);
+        ActionHandlerPrototype existing = registry.put(actionName, proto);
         if (cl != null) classLoaders.put(actionName, cl);
+
         if (existing != null) {
             log.warn("[PluginCenter] Step '{}' from '{}' overrides existing from '{}'",
-                    actionName, source, existing.getClass().getSimpleName());
+                    actionName, source, existing.clazz().getSimpleName());
             return false;
         }
-        log.debug("[PluginCenter] Registered step '{}' → {} (from {})",
-                actionName, handler.getClass().getSimpleName(), source);
+        log.debug("[PluginCenter] Registered step '{}' → {} (from {}, runtimeDeps={}) — prototype ready",
+                actionName, clazz.getSimpleName(), source, runtimeDeps);
         return true;
     }
 
@@ -642,6 +900,33 @@ public class PluginCenter {
             // 所以只能跳过这个实现（spring-context provided 依赖的外置 step 模块应该在独立 jar 里）。
             return null;
         } catch (ReflectiveOperationException e) {
+            return null;
+        }
+    }
+
+    /**
+     * 用 prototype 指定的 ClassLoader 反射 new ActionHandler 实例 —— 核心改动。
+     * <p>
+     * 外置 jar handler 必须在**它自己的 URLClassLoader** 里被实例化，否则会从宿主 fat jar 拿到
+     * 同名类（SPI 依赖版本不一致时 ClassCastException）。内置 handler 用 Spring context CL 即可。
+     */
+    private ActionHandler tryInstantiateInCL(ActionHandlerPrototype proto) {
+        try {
+            ClassLoader cl = proto.classLoader();
+            if (cl == null) cl = Thread.currentThread().getContextClassLoader();
+            Class<?> actual = cl == proto.clazz().getClassLoader()
+                    ? proto.clazz()
+                    : Class.forName(proto.clazz().getName(), true, cl);
+            actual.getDeclaredConstructor();  // 先验证无参构造器
+            Object instance = actual.getDeclaredConstructor().newInstance();
+            return (ActionHandler) instance;
+        } catch (NoSuchMethodException e) {
+            log.warn("[PluginCenter] {} — no public no-arg constructor, cannot instantiate per-step",
+                    proto.clazz().getSimpleName());
+            return null;
+        } catch (ReflectiveOperationException e) {
+            log.warn("[PluginCenter] {} — instantiation failed: {}", proto.clazz().getSimpleName(),
+                    e.getCause() != null ? e.getCause().getMessage() : e.getMessage());
             return null;
         }
     }

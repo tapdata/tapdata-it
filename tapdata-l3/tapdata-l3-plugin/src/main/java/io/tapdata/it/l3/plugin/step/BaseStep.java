@@ -138,7 +138,9 @@ public abstract class BaseStep implements ActionHandler {
                 // 3a. 成功返回 — 自动注册 outputs
                 if (result != null && result.getOutputs() != null) {
                     for (Map.Entry<String, Object> entry : result.getOutputs().entrySet()) {
-                        ctx.setStepOutput(config.getId(), entry.getKey(), entry.getValue());
+                        if (entry.getKey() != null && entry.getValue() != null) {
+                            ctx.setStepOutput(config.getId(), entry.getKey(), entry.getValue());
+                        }
                     }
                 }
             } catch (CompletionException ce) {

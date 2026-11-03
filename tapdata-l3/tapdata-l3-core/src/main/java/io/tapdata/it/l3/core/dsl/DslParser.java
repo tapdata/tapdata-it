@@ -38,12 +38,16 @@ import java.util.regex.Pattern;
 public class DslParser {
 
     private static final Logger log = LoggerFactory.getLogger(DslParser.class);
-    private static final Set<String> TIMEOUT_REQUIRED_ACTIONS = Set.of(
-            "tm_api_wait_task_status",
-            "assert_jdbc_data", "assert_jdbc_row_count", "assert_jdbc_data_consistency",
-            "assert_mongo_data", "assert_mongo_count", "assert_mongo_consistency",
-            "system_wait_recovery"
-    );
+
+    /**
+     * 模式匹配：所有 {@code assert_*} 和 {@code wait_*} 开头的 action 默认要求 {@code timeout_seconds}。
+     * 原来硬编码的 TIMEOUT_REQUIRED_ACTIONS 白名单（tm_api_wait_task_status 等）与实际 action 名不一致，
+     * 改成前缀匹配更健壮 —— 新增的 assert_/wait_ action 自动纳入，无需维护列表。
+     */
+    private static boolean requiresTimeout(String actionName) {
+        return actionName != null
+                && (actionName.startsWith("assert_") || actionName.startsWith("wait_") || actionName.startsWith("tm_wait"));
+    }
 
     /** Matches #steps['STEP_ID'].outputs['KEY'] patterns — used for cross-step reference validation. */
     private static final Pattern STEP_REF_PATTERN =
@@ -88,19 +92,21 @@ public class DslParser {
     /**
      * Safe variant — files that fail to parse are skipped with a warning log instead of aborting.
      * Useful for CLI run command where a directory may contain intentionally broken test cases.
+     * <p>
+     * 【修复】去掉了外层先 parseDirectory 再 per-file 循环的逻辑 —— 之前 parseDirectory 成功时
+     * 会让 result 已经有所有条目，然后 fallthrough 到 per-file 循环导致成功文件被 parse 两次。
+     * 现在只做 per-file safe parse，每个文件独立 try-catch。
      */
     public List<ScenarioConfig> parseDirectorySafe(Path dir) {
         List<ScenarioConfig> result = new ArrayList<>();
-        try {
-            result.addAll(parseDirectory(dir));
-        } catch (DslParseException ignored) {
-            // Fall through — use per-file safe parsing below
-        }
-        // Fallback: try each file individually
         try (var stream = Files.list(dir)) {
             List<Path> files = stream
                     .filter(p -> p.toString().endsWith(".yaml") || p.toString().endsWith(".yml"))
+                    .sorted(Comparator.comparing(p -> p.getFileName().toString()))
                     .toList();
+            if (files.isEmpty()) {
+                log.warn("[DSL] No .yaml/.yml files found in {}", dir);
+            }
             for (Path f : files) {
                 try {
                     result.add(parse(f));
@@ -207,11 +213,25 @@ public class DslParser {
         // use — 显式指定 step 实现的 Maven 坐标（覆盖默认注册表版本）
         String use = optionalString(map, "use", null);
 
-        // Validate: timeout_seconds required for assert_* and wait_* actions
-        if (TIMEOUT_REQUIRED_ACTIONS.contains(action) && timeoutSeconds <= 0) {
+        // Validate: timeout_seconds required for assert_* and wait_* actions (模式匹配)
+        if (requiresTimeout(action) && timeoutSeconds <= 0) {
             throw new DslParseException(String.format(
                     "Invalid DSL: Step '%s' (action=%s) requires 'timeout_seconds' parameter",
                     id, action));
+        }
+
+        // 宽松式 inputs 类型 WARN —— 检查值类型是否为合法 JSON/YAML 类型
+        if (inputs != null && !inputs.isEmpty()) {
+            for (Map.Entry<String, Object> e : inputs.entrySet()) {
+                Object v = e.getValue();
+                if (v == null) continue;
+                if (!(v instanceof String) && !(v instanceof Number) && !(v instanceof Boolean)
+                        && !(v instanceof Map) && !(v instanceof List)) {
+                    log.warn("[DSL] Step '{}' inputs.{} has unusual type {} (allowed: String/Number/Boolean/Map/List) — "
+                                    + "SpEL 求值或 handler 内使用时可能需要注意",
+                            id, e.getKey(), v.getClass().getSimpleName());
+                }
+            }
         }
 
         return StepConfig.builder()

@@ -133,7 +133,7 @@ class MavenPluginResolverTest {
         @DisplayName("传入 Nexus URL 不抛异常")
         void initWithNexusUrl(@TempDir Path tempRepo) {
             assertDoesNotThrow(() -> new MavenPluginResolver(
-                    tempRepo.toString(), "https://nexus.example.com/repository/maven-public/"));
+                    tempRepo.toString(), List.of("https://nexus.example.com/repository/maven-public/")));
         }
 
         @Test
@@ -249,9 +249,8 @@ class MavenPluginResolverTest {
         @Test
         @DisplayName("空 Nexus URL 被当作 null 处理")
         void blankNexusUrlTreatedAsNull(@TempDir Path tempRepo) {
-            // "" 和 "   " 都应该被忽略
-            assertDoesNotThrow(() -> new MavenPluginResolver(tempRepo.toString(), ""));
-            assertDoesNotThrow(() -> new MavenPluginResolver(tempRepo.toString(), "   "));
+            // 空列表也应该走默认 Central 兜底
+            assertDoesNotThrow(() -> new MavenPluginResolver(tempRepo.toString(), List.of()));
         }
     }
 }
