@@ -11,6 +11,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
+import java.util.Collection;
 import java.util.Map;
 
 /**
@@ -32,7 +33,7 @@ public class StepRunner {
         this.pluginCenter = pluginCenter;
     }
 
-    public StepResult run(StepConfig stepConfig, ScenarioContext ctx) {
+    public StepResult run(StepConfig stepConfig, ScenarioContext ctx, Collection<ActionHandler> usedHandlers) {
         // 1. 通过 PluginCenter 获取 Step（自动懒加载外置 step）
         //    优先级：已内置/已加载 > DSL `use` 显式坐标 > 默认注册表 (steps-registry.yaml)
         ActionHandler handler;
@@ -42,8 +43,13 @@ public class StepRunner {
             Throwable err = new IllegalStateException(String.format(
                     "Step '%s' load failed: %s. Use `use` field or check steps-registry.yaml. Registry: %s",
                     stepConfig.getAction(), e.getMessage(), pluginCenter.getDefaultRegistry().keySet()), e);
+            log.error("[Step] '{}' → {} PluginLoadException: {}",
+                    stepConfig.getId(), stepConfig.getAction(), e.getMessage(), e);
             return StepResult.failure(stepConfig, err, 0);
         }
+
+        // 注册本次独立 handler 实例到 scenario 级收集 —— 用于最终统一 destroy
+        if (usedHandlers != null) usedHandlers.add(handler);
 
         // 2. 运行时依赖自动加载 — 合并 ActionHandler.getRuntimeDependencies() + DSL extra_deps
         //    这是 extra_deps 生效的唯一触发点：每次 step 执行前都会检查并解析依赖。
@@ -81,8 +87,9 @@ public class StepRunner {
         Instant start = Instant.now();
         long t0 = System.nanoTime();
         try {
-            log.info("[Step] Starting '{}' → {} (handler={}) ...",
-                    stepConfig.getId(), stepConfig.getAction(), handler.getClass().getSimpleName());
+            log.info("[Step] Starting '{}' → {} (handler={}@{}) ...",
+                    stepConfig.getId(), stepConfig.getAction(), handler.getClass().getSimpleName(),
+                    Integer.toHexString(System.identityHashCode(handler)));
             handler.execute(resolved, ctx);
             long durationMs = (System.nanoTime() - t0) / 1_000_000;
             log.info("[Step] '{}' → {} [SUCCESS] ({}ms)", stepConfig.getId(),

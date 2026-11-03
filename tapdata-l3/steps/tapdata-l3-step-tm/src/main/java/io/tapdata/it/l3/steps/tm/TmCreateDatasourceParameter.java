@@ -58,4 +58,7 @@ public class TmCreateDatasourceParameter extends ParameterConfig {
 
     /** 额外 PDK config override — 可选，会与标准字段合并后传给 TM。 */
     private Map<String, Object> config;
+
+    /** 指定 agent processId — 可选。设置后 Connection 使用 MANUALLY_SPECIFIED_BY_THE_USER. */
+    private String agentId;
 }

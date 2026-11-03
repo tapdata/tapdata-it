@@ -78,6 +78,20 @@ public class AssertJdbcDataAction extends BaseStep {
         return "assert_jdbc_data";
     }
 
+    /** 所有常见 JDBC Driver 的 Maven 坐标 — 运行时自动下载。 */
+    @Override
+    public List<String> getRuntimeDependencies() {
+        return List.of(
+                "mysql:mysql-connector-java:8.0.29",
+                "org.mariadb.jdbc:mariadb-java-client:3.3.3",
+                "org.postgresql:postgresql:42.1.4",
+                "org.xerial:sqlite-jdbc:3.45.3.0",
+                "com.clickhouse:clickhouse-jdbc:0.4.6",
+                "com.oracle.database.jdbc:ojdbc11:23.3.0.23.09",
+                "com.microsoft.sqlserver:mssql-jdbc:12.2.0.jre11"
+        );
+    }
+
     @Override
     protected StepResult doExecute(StepConfig config, ScenarioContext ctx) throws Exception {
         AssertJdbcDataParameter p = config.getInputParameterConfig(AssertJdbcDataParameter.class);

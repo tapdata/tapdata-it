@@ -14,15 +14,14 @@ import java.util.Map;
 /**
  * Execute an existing TM Inspect task and wait for completion.
  * <p>
- * API: {@code POST /api/Inspects/execute?where={"id":"..."}}
- *
+ * TM Inspect 状态机 (经 curl 实证):
  * <pre>
- * - id: execute_inspect
- *   action: tm_execute_inspect
- *   timeout_seconds: 600
- *   inputs:
- *     inspect_id: "#{ #steps['create_inspect_task'].outputs['inspect_id'] }"
+ *   create → scheduling → running → done | error
  * </pre>
+ *
+ * API: {@code POST /api/Inspects/execute?where={"id":"..."}}
+ * Body 需要包含 {@code id} 和 {@code status: "scheduling"} 来触发调度.
+ * 为了防止 TM 再次改 agentId, execute body 也带上 agentId.
  *
  * Outputs: {@code inspect_id}, {@code status}, {@code mismatched_tables}, {@code total_tables}
  */
@@ -57,32 +56,44 @@ public class TmExecuteInspectAction extends BaseStep {
 
         log.info("[TM] Executing Inspect task: {}", inspectId);
 
-        // Step 1: 执行校验
-        Map<String, Object> where = Map.of("id", inspectId);
-        // POST /api/Inspects/execute?where=...
-        // where 是 JSON 字符串参数
+        // Step 1: 先获取当前 inspect 详情, 拿到 agentId (防止 execute 后 TM 改 agentId)
+        JsonNode inspectBefore = client.get("/api/Inspects/find/" + inspectId);
+        String originalAgentId = text(inspectBefore, "agentId");
+        log.info("[TM] Inspect before execute: agentId={}", originalAgentId);
+
+        // Step 2: 执行校验 — include agentId 防止 TM 重分配
         String whereJson = "{\"id\":\"" + inspectId + "\"}";
         Map<String, Object> queryParams = Map.of("where", whereJson);
-        JsonNode resp = client.post("/api/Inspects/execute", queryParams, null);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("id", inspectId);
+        body.put("status", "scheduling");
+        if (originalAgentId != null && !originalAgentId.isBlank()) {
+            body.put("agentId", originalAgentId);
+        }
+        JsonNode resp = client.post("/api/Inspects/execute", queryParams, body);
+        log.debug("[TM] Inspect execute response: {}", resp);
 
-        // Step 2: 等待完成
-        // 轮询 inspect 状态
+        // Step 3: 轮询等待完成
+        // TM 状态机: scheduling → running → done | error
         log.info("[TM] Inspect {} started, waiting for completion...", inspectId);
         int pollInterval = 5000;
-        long deadline = System.currentTimeMillis() + 5 * 60_000L; // 5min 默认
+        int waitTimeout = p.getWaitTimeoutSeconds() > 0 ? p.getWaitTimeoutSeconds() : 300;
+        long deadline = System.currentTimeMillis() + waitTimeout * 1000L;
         String lastStatus = null;
+        String lastAgentId = null;
 
         while (System.currentTimeMillis() < deadline) {
             JsonNode inspectInfo = client.get("/api/Inspects/find/" + inspectId);
             String currentStatus = text(inspectInfo, "status");
-            if (currentStatus == null) currentStatus = text(inspectInfo, "inspectStatus");
+            String currentAgentId = text(inspectInfo, "agentId");
 
-            if (!currentStatus.equals(lastStatus)) {
-                log.info("[TM] Inspect {} status: {}", inspectId, currentStatus);
+            if (!currentStatus.equals(lastStatus) ||
+                    (currentAgentId != null && !currentAgentId.equals(lastAgentId))) {
+                log.info("[TM] Inspect {} status: {} (agentId={})", inspectId, currentStatus, currentAgentId);
                 lastStatus = currentStatus;
+                lastAgentId = currentAgentId;
             }
 
-            // 完成状态
             if (isTerminalStatus(currentStatus)) {
                 break;
             }
@@ -90,55 +101,92 @@ public class TmExecuteInspectAction extends BaseStep {
             Thread.sleep(pollInterval);
         }
 
-        // Step 3: 获取最终结果
+        // Step 4: 获取最终结果 + debug dump if error
         JsonNode finalInfo = client.get("/api/Inspects/find/" + inspectId);
         String finalStatus = text(finalInfo, "status");
-        if (finalStatus == null) finalStatus = text(finalInfo, "inspectStatus");
+        String errorMsg = text(finalInfo, "errorMsg");
+        String result = text(finalInfo, "result");
 
-        // 解析校验结果 — 查找 total / mismatch 统计
+        log.info("[TM] Inspect {} final: status={}, result={}, errorMsg={}", inspectId, finalStatus, result, errorMsg);
+
+        if ("error".equalsIgnoreCase(finalStatus)) {
+            // Debug dump — 帮助排查
+            log.error("[TM] === INSPECT FAILED DEBUG DUMP ===");
+            log.error("[TM] Full inspect detail: {}", finalInfo);
+            String flowId = text(finalInfo, "flowId");
+            if (flowId != null) {
+                try {
+                    JsonNode taskInfo = client.get("/api/Task/" + flowId);
+                    log.error("[TM] Related task detail: {}", taskInfo);
+                } catch (Exception ignored) {}
+            }
+            throw new IllegalStateException("Inspect " + inspectId + " failed: status=" + finalStatus
+                    + ", errorMsg=" + errorMsg + ", fullDetail=" + finalInfo);
+        }
+
+        // Step 5: 解析校验结果 — 从 tasks[].result 或顶层 result 字段
         int totalTables = 0;
         int mismatchedTables = 0;
         long totalRows = 0;
         long mismatchedRows = 0;
 
-        // 从 inspectResult 或者直接从 result 字段获取
-        JsonNode result = finalInfo.has("inspectResult") ? finalInfo.get("inspectResult") : finalInfo;
+        // 方式 A: 从 tasks[] 数组解析 (TM 真实结构)
+        JsonNode tasks = finalInfo.get("tasks");
+        if (tasks != null && tasks.isArray()) {
+            for (JsonNode t : tasks) {
+                totalTables++;
+                String taskResult = text(t, "result");
+                if ("failed".equalsIgnoreCase(taskResult)) {
+                    mismatchedTables++;
+                }
+                // 每个 task 可能有自己的 row 统计
+                if (t.has("mismatchedRows")) mismatchedRows += t.get("mismatchedRows").asLong();
+                if (t.has("totalRows")) totalRows += t.get("totalRows").asLong();
+            }
+        }
 
-        if (result.has("totalTableCount")) {
-            totalTables = result.get("totalTableCount").asInt();
-        }
-        if (result.has("mismatchedTableCount")) {
-            mismatchedTables = result.get("mismatchedTableCount").asInt();
-        }
-        if (result.has("totalRows")) {
-            totalRows = result.get("totalRows").asLong();
-        }
-        if (result.has("mismatchedRows")) {
-            mismatchedRows = result.get("mismatchedRows").asLong();
+        // 方式 B: 从顶层 result 字段
+        if (mismatchedTables == 0 && "failed".equalsIgnoreCase(result)) {
+            mismatchedTables = totalTables;
         }
 
-        log.info("[TM] Inspect {} completed: status={}, totalTables={}, mismatchedTables={}, totalRows={}, mismatchedRows={}",
-                inspectId, finalStatus, totalTables, mismatchedTables, totalRows, mismatchedRows);
+        // 方式 C: 从 result JSON (如果 result 是一个对象字符串)
+        if (result != null && result.startsWith("{")) {
+            try {
+                JsonNode resultJson = new com.fasterxml.jackson.databind.ObjectMapper().readTree(result);
+                if (resultJson.has("totalTableCount")) totalTables = resultJson.get("totalTableCount").asInt();
+                if (resultJson.has("mismatchedTableCount")) mismatchedTables = resultJson.get("mismatchedTableCount").asInt();
+                if (resultJson.has("totalRows")) totalRows = resultJson.get("totalRows").asLong();
+                if (resultJson.has("mismatchedRows")) mismatchedRows = resultJson.get("mismatchedRows").asLong();
+            } catch (Exception ignored) {}
+        }
+
+        boolean success = mismatchedTables == 0 && mismatchedRows == 0
+                && !"failed".equalsIgnoreCase(result);
+
+        log.info("[TM] Inspect {} completed: status={}, result={}, totalTables={}, mismatchedTables={}, totalRows={}, mismatchedRows={}, success={}",
+                inspectId, finalStatus, result, totalTables, mismatchedTables, totalRows, mismatchedRows, success);
 
         Map<String, Object> outputs = new LinkedHashMap<>();
         outputs.put("inspect_id", inspectId);
         outputs.put("status", finalStatus);
+        outputs.put("result", result);
         outputs.put("total_tables", totalTables);
         outputs.put("mismatched_tables", mismatchedTables);
         outputs.put("total_rows", totalRows);
         outputs.put("mismatched_rows", mismatchedRows);
-        outputs.put("success", mismatchedTables == 0 && mismatchedRows == 0);
+        outputs.put("success", success);
         return success(outputs);
     }
 
     private boolean isTerminalStatus(String status) {
         if (status == null) return false;
         String s = status.toLowerCase();
-        return s.contains("complete") || s.contains("success") || s.contains("fail")
-                || s.contains("error") || s.contains("done") || s.contains("cancel");
+        return s.contains("done") || s.contains("complete") || s.contains("success")
+                || s.contains("fail") || s.contains("error") || s.contains("cancel");
     }
 
     private static String text(JsonNode n, String key) {
-        return n.has(key) && !n.get(key).isNull() ? n.get(key).asText() : null;
+        return n != null && n.has(key) && !n.get(key).isNull() ? n.get(key).asText() : null;
     }
 }

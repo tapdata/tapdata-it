@@ -45,6 +45,9 @@ public class TmTaskParameter extends ParameterConfig {
     /** 原始 TaskDto JSON — 完全自定义任务定义. 优先级最高. */
     private Map<String, Object> rawTaskConfig;
 
+    /** 指定 agentId — 可选，用于绕过默认分配有问题的 agent. */
+    private String agentId;
+
     // ===== Wait Task 专属 =====
 
     /** 等待的目标状态: "running" / "stopped" / "completed" / "error". 默认 "completed". */

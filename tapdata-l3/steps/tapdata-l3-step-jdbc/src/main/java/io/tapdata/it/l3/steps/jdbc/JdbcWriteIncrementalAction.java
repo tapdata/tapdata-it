@@ -58,6 +58,21 @@ public class JdbcWriteIncrementalAction extends BaseStep {
 
     private static final Logger log = LoggerFactory.getLogger(JdbcWriteIncrementalAction.class);
 
+    /** 所有常见 JDBC Driver 的 Maven 坐标 — 运行时按需下载。 */
+    private static final List<String> ALL_KNOWN_DRIVERS = List.of(
+            "mysql:mysql-connector-java:8.0.29",
+            "org.mariadb.jdbc:mariadb-java-client:3.3.3",
+            "org.postgresql:postgresql:42.1.4",
+            "org.xerial:sqlite-jdbc:3.45.3.0",
+            "com.clickhouse:clickhouse-jdbc:0.4.6",
+            "com.oracle.database.jdbc:ojdbc11:23.3.0.23.09"
+    );
+
+    @Override
+    public List<String> getRuntimeDependencies() {
+        return ALL_KNOWN_DRIVERS;
+    }
+
     @Override
     public String getActionName() {
         return "jdbc_write_incremental";
@@ -367,18 +382,7 @@ public class JdbcWriteIncrementalAction extends BaseStep {
     }
 
     private static String detectDriver(String jdbcUrl) {
-        if (jdbcUrl == null) return "";
-        Map<String, String> map = Map.of(
-                "jdbc:sqlite:", "org.sqlite.JDBC",
-                "jdbc:mysql:", "com.mysql.cj.jdbc.Driver",
-                "jdbc:postgresql:", "org.postgresql.Driver",
-                "jdbc:mariadb:", "org.mariadb.jdbc.Driver",
-                "jdbc:clickhouse:", "com.clickhouse.jdbc.ClickHouseDriver"
-        );
-        for (Map.Entry<String, String> e : map.entrySet()) {
-            if (jdbcUrl.startsWith(e.getKey())) return e.getValue();
-        }
-        return "";
+        return JdbcParameter.detectDriverClass(jdbcUrl);
     }
 
     private static String quoteId(String name) {

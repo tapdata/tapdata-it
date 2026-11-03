@@ -135,6 +135,21 @@
         </dependencies>
     </dependencyManagement>
 
+    <!-- Nexus TapData 私服 —— deploy L3 step 模块到 Nexus -->
+    <!-- server id 对齐 ~/.m2/settings.xml 里的 nexus-tapdata-net（admin/Gotapd8!） -->
+    <distributionManagement>
+        <snapshotRepository>
+            <id>nexus-tapdata-net</id>
+            <name>Nexus TapData Snapshots</name>
+            <url>https://nexus.tapdata.net/repository/maven-snapshots/</url>
+        </snapshotRepository>
+        <repository>
+            <id>nexus-tapdata-net</id>
+            <name>Nexus TapData Releases</name>
+            <url>https://nexus.tapdata.net/repository/maven-public/</url>
+        </repository>
+    </distributionManagement>
+
     <!-- All L3 submodules inherit Java 17 compilation + Lombok annotation processing -->
     <build>
         <pluginManagement>

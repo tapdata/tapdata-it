@@ -9,9 +9,9 @@
 case_id: "L3-GP-MYSQL-CDC"
 scenario: "Golden Path — MySQL→MySQL 全量+增量同步 + TM VDC 校验"
 description: >
-  覆盖完整黄金路径 15 步：
-  登录 TM → 创建源/目标库 → 注册数据源 → 初始化源库数据 → 创建同步任务 → 启动 → 等待全量 →
-  创建 VDC 校验 → 断言全量一致 → 写入增量 → 等待增量同步 → 再次校验 → 停止任务 → 清理。
+  覆盖完整黄金路径 17 步：
+  登录 TM → 创建源/目标库 → 注册数据源 → 初始化源库数据 → 初始化目标库数据 → 创建同步任务 → 启动 → 等待全量 →
+  创建 VDC 校验 → 断言全量一致 → 写入增量 → 等待增量同步 → 再次校验 → 停止任务 → 删除任务 → 清理。
 
 # =============================================================================
 # Step 1: 登录 TM 获取 access_token
@@ -23,25 +23,26 @@ steps:
     outputs: [access_token, tm_base_url]
 
 # =============================================================================
-# Step 2-3: 使用 dbforge 并行创建源库和目标库
+# Step 2-3: 并行创建源库和目标库（互相独立，无 outputs 交叉引用）
 # =============================================================================
-  - id: create_src_db
-    action: dbforge_create_database
-    timeout_seconds: 120
-    inputs:
-      db_name: "gp_src"
-      db_type: "mysql"
-      topology: "single"
-    outputs: [lease_id, db_name, host, port, database, username, password, jdbc_url]
+  - parallel:
+      - id: create_src_db
+        action: dbforge_create_database
+        timeout_seconds: 120
+        inputs:
+          db_name: "gp_src_run30"
+          db_type: "mysql"
+          topology: "single"
+        outputs: [lease_id, db_name, host, port, database, username, password, jdbc_url]
 
-  - id: create_tgt_db
-    action: dbforge_create_database
-    timeout_seconds: 120
-    inputs:
-      db_name: "gp_tgt"
-      db_type: "mysql"
-      topology: "single"
-    outputs: [lease_id, db_name, host, port, database, username, password, jdbc_url]
+      - id: create_tgt_db
+        action: dbforge_create_database
+        timeout_seconds: 120
+        inputs:
+          db_name: "gp_tgt_run30"
+          db_type: "mysql"
+          topology: "single"
+        outputs: [lease_id, db_name, host, port, database, username, password, jdbc_url]
 
 # =============================================================================
 # Step 4: 在 TM 上注册数据源
@@ -50,36 +51,40 @@ steps:
     action: tm_create_datasource
     timeout_seconds: 60
     inputs:
-      name: "L3_GP_SRC"
+      name: "L3_GP_SRC_run30"
       database_type: "Mysql"
       connection_type: "source_and_target"
-      database_host: "#{ #steps['create_src_db'].outputs['host'] }"
+      database_host: "#{ #steps['create_src_db'].outputs['internal_host'] }"
       database_port: "#{ #steps['create_src_db'].outputs['port'] }"
       database_username: "#{ #steps['create_src_db'].outputs['username'] }"
       database_password: "#{ #steps['create_src_db'].outputs['password'] }"
       database_name: "#{ #steps['create_src_db'].outputs['database'] }"
+      agent_id: "ca96cd0f-e7cc-41dd-a950-e10f89312b40"  # tapsupertest5 (working agent)
     outputs: [connection_id]
 
   - id: create_tgt_datasource
     action: tm_create_datasource
     timeout_seconds: 60
     inputs:
-      name: "L3_GP_TGT"
+      name: "L3_GP_TGT_run30"
       database_type: "Mysql"
       connection_type: "source_and_target"
-      database_host: "#{ #steps['create_tgt_db'].outputs['host'] }"
+      database_host: "#{ #steps['create_tgt_db'].outputs['internal_host'] }"
       database_port: "#{ #steps['create_tgt_db'].outputs['port'] }"
       database_username: "#{ #steps['create_tgt_db'].outputs['username'] }"
       database_password: "#{ #steps['create_tgt_db'].outputs['password'] }"
       database_name: "#{ #steps['create_tgt_db'].outputs['database'] }"
+      agent_id: "ca96cd0f-e7cc-41dd-a950-e10f89312b40"  # tapsupertest5 (working agent)
     outputs: [connection_id]
 
 # =============================================================================
-# Step 5: 初始化源库数据 (自动建表 + 插入初始数据)
+# Step 6: 初始化源库数据 (自动建表 + 插入初始数据)
 # =============================================================================
   - id: init_source
     action: jdbc_init_source
     timeout_seconds: 120
+    extra_deps:
+      - "com.mysql:mysql-connector-j:8.3.0"
     inputs:
       jdbc_url: "#{ #steps['create_src_db'].outputs['jdbc_url'] }"
       username: "#{ #steps['create_src_db'].outputs['username'] }"
@@ -91,22 +96,37 @@ steps:
     outputs: [table_names, total_rows, tables_created]
 
 # =============================================================================
-# Step 6: 在 TM 创建同步任务
+# Step 6b: 测试 TM 数据源连接 (确保 ready 再往下走)
+# =============================================================================
+  - id: test_connections
+    action: tm_test_connection
+    timeout_seconds: 60
+    inputs:
+      connection_ids:
+        - "#{ #steps['create_src_datasource'].outputs['connection_id'] }"
+        - "#{ #steps['create_tgt_datasource'].outputs['connection_id'] }"
+      poll_interval_ms: 2000
+      wait_timeout_seconds: 30
+    outputs: [status, results]
+
+# =============================================================================
+# Step 7: 在 TM 创建同步任务
 # =============================================================================
   - id: create_sync_task
     action: tm_create_task
-    keep_alive: false  # 失败时也清理
+    keep_alive: false
     timeout_seconds: 60
     inputs:
-      name: "GP_MySQL_FullSync_CDC"
+      name: "GP_MySQL_FullSync_CDC_run30"
       sync_type: "sync"
+      agent_id: "ca96cd0f-e7cc-41dd-a950-e10f89312b40"
       source_connection_id: "#{ #steps['create_src_datasource'].outputs['connection_id'] }"
       target_connection_id: "#{ #steps['create_tgt_datasource'].outputs['connection_id'] }"
       source_tables: "#{ #steps['init_source'].outputs['table_names'] }"
     outputs: [task_id, sync_type]
 
 # =============================================================================
-# Step 7: 启动同步任务
+# Step 8: 启动同步任务
 # =============================================================================
   - id: start_sync_task
     action: tm_start_task
@@ -122,7 +142,7 @@ steps:
     timeout_seconds: 600
     inputs:
       task_id: "#{ #steps['create_sync_task'].outputs['task_id'] }"
-      target_status: "completed"
+      target_status: "complete"
       poll_interval_ms: 5000
       wait_timeout_seconds: 300
     outputs: [final_status, reached_target]
@@ -135,8 +155,9 @@ steps:
     keep_alive: false
     timeout_seconds: 60
     inputs:
-      name: "GP_VDC_1st"
+      name: "GP_VDC_run30"
       task_id: "#{ #steps['create_sync_task'].outputs['task_id'] }"
+      agent_id: "#{ #steps['create_sync_task'].outputs['agent_id'] }"
       source_connection_id: "#{ #steps['create_src_datasource'].outputs['connection_id'] }"
       target_connection_id: "#{ #steps['create_tgt_datasource'].outputs['connection_id'] }"
       tables: "#{ #steps['init_source'].outputs['table_names'] }"
@@ -169,6 +190,8 @@ steps:
   - id: write_incremental
     action: jdbc_write_incremental
     timeout_seconds: 120
+    extra_deps:
+      - "com.mysql:mysql-connector-j:8.3.0"
     inputs:
       jdbc_url: "#{ #steps['create_src_db'].outputs['jdbc_url'] }"
       username: "#{ #steps['create_src_db'].outputs['username'] }"
@@ -189,7 +212,7 @@ steps:
     timeout_seconds: 300
     inputs:
       task_id: "#{ #steps['create_sync_task'].outputs['task_id'] }"
-      target_status: "completed"
+      target_status: "complete"
       poll_interval_ms: 5000
       wait_timeout_seconds: 120
     outputs: [final_status, reached_target]
@@ -224,7 +247,7 @@ steps:
       task_id: "#{ #steps['create_sync_task'].outputs['task_id'] }"
 
 # =============================================================================
-# Step 17: 删除同步任务 (显式删除 + 自动 cleanup 会双保险)
+# Step 17: 删除同步任务
 # =============================================================================
   - id: delete_sync_task
     action: tm_delete_task

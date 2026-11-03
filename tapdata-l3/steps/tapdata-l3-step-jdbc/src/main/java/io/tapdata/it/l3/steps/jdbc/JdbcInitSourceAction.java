@@ -48,9 +48,9 @@ public class JdbcInitSourceAction extends BaseStep {
 
     private static final Logger log = LoggerFactory.getLogger(JdbcInitSourceAction.class);
 
-    /** 随机列类型池. */
+    /** 安全随机列类型池 — 只使用 MySQL 严格模式下不会被截断的类型. */
     private static final String[] COLUMN_TYPES = {
-            "INTEGER", "BIGINT", "VARCHAR(255)", "DOUBLE", "TEXT", "TIMESTAMP", "BOOLEAN"
+            "INTEGER", "BIGINT", "VARCHAR(255)", "DOUBLE", "DECIMAL(10,2)", "DATE"
     };
 
     /** 随机表名前缀. */
@@ -63,6 +63,19 @@ public class JdbcInitSourceAction extends BaseStep {
     @Override
     public String getActionName() {
         return "jdbc_init_source";
+    }
+
+    /** 复用与 JdbcWriteIncrementalAction 相同的驱动坐标声明。 */
+    @Override
+    public List<String> getRuntimeDependencies() {
+        return List.of(
+                "mysql:mysql-connector-java:8.0.29",
+                "org.mariadb.jdbc:mariadb-java-client:3.3.3",
+                "org.postgresql:postgresql:42.1.4",
+                "org.xerial:sqlite-jdbc:3.45.3.0",
+                "com.clickhouse:clickhouse-jdbc:0.4.6",
+                "com.oracle.database.jdbc:ojdbc11:23.3.0.23.09"
+        );
     }
 
     @Override
@@ -117,13 +130,14 @@ public class JdbcInitSourceAction extends BaseStep {
                 // Step 2: INSERT — 批量生成随机数据
                 int rowsToInsert = p.getRowsPerTable();
                 if (rowsToInsert > 0) {
-                    List<String> columnNames = extractColumnNames(tableName, conn);
+                    List<ColumnInfo> columns = extractColumnInfo(tableName, conn);
+                    List<String> columnNames = columns.stream().map(ColumnInfo::name).toList();
                     String insertSql = buildInsertSql(tableName, columnNames);
                     log.info("[JdbcInit] Inserting {} rows into {}", rowsToInsert, tableName);
 
                     try (PreparedStatement ps = conn.prepareStatement(insertSql)) {
                         for (int i = 0; i < rowsToInsert; i++) {
-                            bindRandomValues(ps, columnNames.size(), i);
+                            bindRandomValues(ps, columns, i);
                             ps.addBatch();
 
                             if ((i + 1) % 100 == 0) {
@@ -168,11 +182,10 @@ public class JdbcInitSourceAction extends BaseStep {
                 sb.append(",\n");
             }
         } else {
-            // 自动生成随机列
-            ThreadLocalRandom random = ThreadLocalRandom.current();
+            // 自动生成随机列 — 循环分配安全类型，保证后续 bindRandomValues 能正确匹配
             int colCount = Math.max(1, defaultColumns);
             for (int i = 0; i < colCount; i++) {
-                String colType = COLUMN_TYPES[random.nextInt(COLUMN_TYPES.length)];
+                String colType = COLUMN_TYPES[i % COLUMN_TYPES.length];
                 String colName = "col_" + (char) ('a' + i);
                 sb.append("  ").append(quoteId(colName)).append(" ").append(colType).append(",\n");
             }
@@ -184,19 +197,23 @@ public class JdbcInitSourceAction extends BaseStep {
         return sb.toString();
     }
 
-    private List<String> extractColumnNames(String tableName, Connection conn) throws SQLException {
-        List<String> names = new ArrayList<>();
+    private List<ColumnInfo> extractColumnInfo(String tableName, Connection conn) throws SQLException {
+        List<ColumnInfo> infos = new ArrayList<>();
         try (ResultSet rs = conn.getMetaData().getColumns(null, null, tableName, null)) {
             while (rs.next()) {
-                names.add(rs.getString("COLUMN_NAME"));
+                String name = rs.getString("COLUMN_NAME");
+                int dataType = rs.getInt("DATA_TYPE");
+                infos.add(new ColumnInfo(name, dataType));
             }
         }
-        // 如果元数据没拿到，手动加 id + col_x
-        if (names.isEmpty()) {
-            names.add("id");
-            for (int i = 0; i < 5; i++) names.add("col_" + (char) ('a' + i));
+        if (infos.isEmpty()) {
+            // fallback: id BIGINT + col_x as VARCHAR
+            infos.add(new ColumnInfo("id", java.sql.Types.BIGINT));
+            for (int i = 0; i < 5; i++) {
+                infos.add(new ColumnInfo("col_" + (char) ('a' + i), java.sql.Types.VARCHAR));
+            }
         }
-        return names;
+        return infos;
     }
 
     private String buildInsertSql(String tableName, List<String> columnNames) {
@@ -214,23 +231,50 @@ public class JdbcInitSourceAction extends BaseStep {
         return sb.toString();
     }
 
-    private void bindRandomValues(PreparedStatement ps, int paramCount, int rowIndex) throws SQLException {
+    private void bindRandomValues(PreparedStatement ps, List<ColumnInfo> columns, int rowIndex) throws SQLException {
         ThreadLocalRandom random = ThreadLocalRandom.current();
-        for (int i = 0; i < paramCount; i++) {
-            if (i == 0) {
-                // id 列
-                ps.setLong(i + 1, rowIndex + 1);
-            } else {
-                int type = random.nextInt(7);
-                switch (type) {
-                    case 0 -> ps.setInt(i + 1, random.nextInt(-10000, 10000));
-                    case 1 -> ps.setLong(i + 1, random.nextLong(-1000000, 1000000));
-                    case 2 -> ps.setString(i + 1, "val_" + random.nextInt(1000));
-                    case 3 -> ps.setDouble(i + 1, random.nextDouble() * 1000 - 500);
-                    case 4 -> ps.setString(i + 1, "text_" + random.nextInt(1000));
-                    case 5 -> ps.setTimestamp(i + 1, Timestamp.valueOf("2024-01-01 00:00:00"));
-                    default -> ps.setBoolean(i + 1, random.nextBoolean());
+        for (int i = 0; i < columns.size(); i++) {
+            ColumnInfo col = columns.get(i);
+            int paramIndex = i + 1;
+            int sqlType = col.sqlType();
+
+            try {
+                switch (sqlType) {
+                    case java.sql.Types.TINYINT, java.sql.Types.SMALLINT,
+                         java.sql.Types.INTEGER -> ps.setInt(paramIndex, random.nextInt(-100000, 100000));
+                    case java.sql.Types.BIGINT -> ps.setLong(paramIndex, rowIndex + 1);
+                    case java.sql.Types.REAL, java.sql.Types.FLOAT -> ps.setFloat(paramIndex, (float) (random.nextDouble() * 1000 - 500));
+                    case java.sql.Types.DOUBLE, java.sql.Types.NUMERIC,
+                         java.sql.Types.DECIMAL -> ps.setDouble(paramIndex, random.nextDouble() * 10000 - 5000);
+                    case java.sql.Types.VARCHAR, java.sql.Types.CHAR,
+                         java.sql.Types.LONGVARCHAR, java.sql.Types.NVARCHAR,
+                         java.sql.Types.NCHAR, java.sql.Types.CLOB,
+                         java.sql.Types.LONGNVARCHAR, java.sql.Types.NCLOB ->
+                            ps.setString(paramIndex, "val_" + random.nextInt(100000));
+                    case java.sql.Types.TIMESTAMP, java.sql.Types.TIMESTAMP_WITH_TIMEZONE ->
+                            ps.setTimestamp(paramIndex, Timestamp.valueOf("2024-01-01 12:00:00"));
+                    case java.sql.Types.DATE -> ps.setDate(paramIndex, java.sql.Date.valueOf("2024-01-15"));
+                    case java.sql.Types.TIME, java.sql.Types.TIME_WITH_TIMEZONE ->
+                            ps.setTime(paramIndex, java.sql.Time.valueOf("12:00:00"));
+                    case java.sql.Types.BOOLEAN, java.sql.Types.BIT ->
+                            ps.setBoolean(paramIndex, random.nextBoolean());
+                    case java.sql.Types.BINARY, java.sql.Types.VARBINARY,
+                         java.sql.Types.LONGVARBINARY, java.sql.Types.BLOB ->
+                            ps.setBytes(paramIndex, ("blob_" + random.nextInt(1000)).getBytes());
+                    default -> {
+                        // fallback: 先试 setString，不行就 setObject
+                        try {
+                            ps.setString(paramIndex, "fallback_" + random.nextInt(100000));
+                        } catch (SQLException ex) {
+                            ps.setObject(paramIndex, rowIndex + 1);
+                        }
+                    }
                 }
+            } catch (SQLException e) {
+                log.warn("[JdbcInit] bind column '{}' (sqlType={}) failed, using fallback: {}",
+                        col.name(), sqlType, e.getMessage());
+                // 最终 fallback: setObject
+                ps.setObject(paramIndex, rowIndex + 1);
             }
         }
     }
@@ -281,18 +325,7 @@ public class JdbcInitSourceAction extends BaseStep {
     }
 
     private static String detectDriver(String jdbcUrl) {
-        if (jdbcUrl == null) return "";
-        Map<String, String> map = Map.of(
-                "jdbc:sqlite:", "org.sqlite.JDBC",
-                "jdbc:mysql:", "com.mysql.cj.jdbc.Driver",
-                "jdbc:postgresql:", "org.postgresql.Driver",
-                "jdbc:mariadb:", "org.mariadb.jdbc.Driver",
-                "jdbc:clickhouse:", "com.clickhouse.jdbc.ClickHouseDriver"
-        );
-        for (Map.Entry<String, String> e : map.entrySet()) {
-            if (jdbcUrl.startsWith(e.getKey())) return e.getValue();
-        }
-        return "";
+        return JdbcParameter.detectDriverClass(jdbcUrl);
     }
 
     private static String quoteId(String name) {

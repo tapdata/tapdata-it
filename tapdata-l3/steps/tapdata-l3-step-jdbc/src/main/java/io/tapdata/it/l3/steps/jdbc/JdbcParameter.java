@@ -21,6 +21,14 @@ public class JdbcParameter extends ParameterConfig {
     private String password;
     private String driverClass;
 
+    /**
+     * JDBC Driver 的 Maven 坐标 (groupId:artifactId:version)。
+     * <p>
+     * 如果留空，会根据 jdbc_url 自动推断（mysql / postgresql / mariadb / sqlite / clickhouse）。
+     * 自定义驱动请手动指定坐标 —— 框架会在运行时自动下载并追加到 Step 的 ClassLoader。
+     */
+    private String driverCoordinate;
+
     // ===== Init Source 专属 =====
 
     /** 要创建的表数量. */
@@ -60,4 +68,50 @@ public class JdbcParameter extends ParameterConfig {
 
     /** 自定义脚本文件路径 — 与 customSql 二选一. */
     private String scriptPath;
+
+    // ===== JDBC Driver 坐标自动映射 =====
+
+    /**
+     * 从 jdbcUrl 前缀推断对应的 JDBC Driver Maven 坐标。
+     * 映射表覆盖最常见的 6 种数据库；不在表中的返回 null（需要用户手动指定 driverCoordinate）。
+     */
+    private static final Map<String, String> URL_TO_COORDINATE = Map.of(
+            "jdbc:mysql:",      "mysql:mysql-connector-java:8.0.29",
+            "jdbc:mariadb:",    "org.mariadb.jdbc:mariadb-java-client:3.3.3",
+            "jdbc:postgresql:", "org.postgresql:postgresql:42.1.4",
+            "jdbc:sqlite:",     "org.xerial:sqlite-jdbc:3.45.3.0",
+            "jdbc:clickhouse:", "com.clickhouse:clickhouse-jdbc:0.4.6",
+            "jdbc:oracle:",     "com.oracle.database.jdbc:ojdbc11:23.3.0.23.09"
+    );
+
+    /**
+     * 解析最终生效的 driverCoordinate —— 用户显式指定优先，否则按 jdbcUrl 自动推断。
+     */
+    public String resolveDriverCoordinate() {
+        if (driverCoordinate != null && !driverCoordinate.isBlank()) return driverCoordinate;
+        if (jdbcUrl == null) return null;
+        for (Map.Entry<String, String> e : URL_TO_COORDINATE.entrySet()) {
+            if (jdbcUrl.startsWith(e.getKey())) return e.getValue();
+        }
+        return null;
+    }
+
+    /**
+     * 从 jdbcUrl 前缀推断对应的 JDBC Driver class name。
+     */
+    public static String detectDriverClass(String jdbcUrl) {
+        if (jdbcUrl == null) return null;
+        Map<String, String> urlToClass = Map.of(
+                "jdbc:mysql:",      "com.mysql.cj.jdbc.Driver",
+                "jdbc:mariadb:",    "org.mariadb.jdbc.Driver",
+                "jdbc:postgresql:", "org.postgresql.Driver",
+                "jdbc:sqlite:",     "org.sqlite.JDBC",
+                "jdbc:clickhouse:", "com.clickhouse.jdbc.ClickHouseDriver",
+                "jdbc:oracle:",     "oracle.jdbc.OracleDriver"
+        );
+        for (Map.Entry<String, String> e : urlToClass.entrySet()) {
+            if (jdbcUrl.startsWith(e.getKey())) return e.getValue();
+        }
+        return null;
+    }
 }

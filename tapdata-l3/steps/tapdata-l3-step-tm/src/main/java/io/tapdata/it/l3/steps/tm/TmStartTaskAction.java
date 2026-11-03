@@ -59,14 +59,15 @@ public class TmStartTaskAction extends BaseStep {
         // PUT /api/Task/start/{id} — no body needed
         JsonNode resp = client.put("/api/Task/start/" + taskId, null, null);
 
-        // Verify it's now running
+        // Verify it's now running — TM 用的是 "status" 不是 "flowStatus"
         JsonNode taskInfo = client.get("/api/Task/" + taskId);
-        String status = text(taskInfo, "flowStatus");
+        String status = text(taskInfo, "status");
+        if (status == null) status = text(taskInfo, "flowStatus");
         log.info("[TM] Task {} started, current status={}", taskId, status);
 
         Map<String, Object> outputs = new LinkedHashMap<>();
         outputs.put("task_id", taskId);
-        outputs.put("status", status);
+        if (status != null) outputs.put("status", status);
         return success(outputs);
     }
 

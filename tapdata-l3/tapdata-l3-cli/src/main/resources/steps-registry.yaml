@@ -16,14 +16,27 @@ dbforge_create_database: "io.tapdata.it.l3:tapdata-l3-step-dbforge:1.0.0-SNAPSHO
 dbforge_destroy_database: "io.tapdata.it.l3:tapdata-l3-step-dbforge:1.0.0-SNAPSHOT"
 dbforge_execute_sql: "io.tapdata.it.l3:tapdata-l3-step-dbforge:1.0.0-SNAPSHOT"
 
-# --- TM step 家族 (5 个 action 共享一个 jar) ---
+# --- TM step 家族 (13 个 action 共享一个 jar) ---
 tm_login: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
 tm_create_datasource: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
 tm_list_datasources: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
 tm_delete_datasource: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
+tm_test_connection: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
 tm_get_task: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
+tm_create_task: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
+tm_start_task: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
+tm_wait_task: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
+tm_stop_task: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
+tm_delete_task: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
+tm_create_inspect: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
+tm_execute_inspect: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
+tm_assert_inspect_result: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
 
 # --- Assert-JDBC step 家族 ---
 assert_jdbc_data: "io.tapdata.it.l3:tapdata-l3-step-assert-jdbc:1.0.0-SNAPSHOT"
+
+# --- JDBC Operations step 家族 ---
+jdbc_init_source: "io.tapdata.it.l3:tapdata-l3-step-jdbc:1.0.0-SNAPSHOT"
+jdbc_write_incremental: "io.tapdata.it.l3:tapdata-l3-step-jdbc:1.0.0-SNAPSHOT"
 
 # 注意：echo / sleep 是 tapdata-l3-core 内置 step（不需要外置加载）

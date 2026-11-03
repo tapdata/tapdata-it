@@ -11,9 +11,17 @@ import org.slf4j.LoggerFactory;
 import java.util.*;
 
 /**
- * Create a TM Inspect (data verification) task tied to a sync task.
+ * Create a TM Inspect (data verification) task tied to a sync task (flow).
  * <p>
- * API: {@code POST /api/Inspects}
+ * TM Inspect API 契约 (经 curl 实证):
+ * <pre>
+ *   - flowId 必须存在 (= 同步任务 ID)
+ *   - agentTags 必须存在: ["private"] — 但传了会导致 TM 按 tag 自动分配 agentId！
+ *     最佳实践: 只传 agentId, 不传 agentTags — TM 会从 agentId 自动填 agentTags
+ *   - agentType = "private" (不是 "Collect"!)
+ *   - platformInfo.agentType = "private"
+ *   - tasks[].source/target 必须有 inspectDataSource=true, connectionId, nodeId, table 等完整字段
+ * </pre>
  *
  * <pre>
  * - id: create_inspect_task
@@ -21,8 +29,9 @@ import java.util.*;
  *   inputs:
  *     name: "gp_inspect_1"
  *     task_id: "#{ #steps['create_sync_task'].outputs['task_id'] }"
- *     source_connection_id: "#{ #steps['create_src_conn'].outputs['connection_id'] }"
- *     target_connection_id: "#{ #steps['create_tgt_conn'].outputs['connection_id'] }"
+ *     agent_id: "ca96cd0f-e7cc-41dd-a950-e10f89312b40"
+ *     source_connection_id: "#{ #steps['create_src_datasource'].outputs['connection_id'] }"
+ *     target_connection_id: "#{ #steps['create_tgt_datasource'].outputs['connection_id'] }"
  *     tables: ["users", "orders"]
  *     inspect_mode: "all"
  * </pre>
@@ -57,7 +66,7 @@ public class TmCreateInspectAction extends BaseStep {
             throw new IllegalArgumentException("Required input missing: name");
         }
         if (p.getTaskId() == null || p.getTaskId().isBlank()) {
-            throw new IllegalArgumentException("Required input missing: task_id");
+            throw new IllegalArgumentException("Required input missing: task_id (= flowId)");
         }
 
         Map<String, Object> body;
@@ -66,14 +75,18 @@ public class TmCreateInspectAction extends BaseStep {
             body = new LinkedHashMap<>(p.getRawInspectConfig());
             body.put("name", p.getName());
         } else {
-            body = buildInspectBody(p);
+            // 自动构建完整 Inspect body — 核心修复：从 sync task DAG 提取 node 信息
+            body = buildInspectBody(p, ctx);
         }
 
-        log.info("[TM] Creating Inspect task '{}' for sync task {}", p.getName(), p.getTaskId());
+        log.info("[TM] Creating Inspect task '{}' for flowId={}, agentId={}",
+                p.getName(), p.getTaskId(), p.getAgentId());
+        log.debug("[TM] Inspect create body: {}", body);
+
         JsonNode resp = client.post("/api/Inspects", body);
 
         String inspectId = text(resp, "id");
-        log.info("[TM] Inspect created: id={}", inspectId);
+        log.info("[TM] Inspect created: id={}, agentId={}", inspectId, text(resp, "agentId"));
 
         // Auto-cleanup
         if (!config.isKeepAlive() && inspectId != null) {
@@ -94,51 +107,159 @@ public class TmCreateInspectAction extends BaseStep {
         return success(outputs);
     }
 
-    private Map<String, Object> buildInspectBody(TmInspectParameter p) {
+    /**
+     * 构建完整的 InspectDto.
+     * <p>
+     * 核心修复: 从 TM 同步任务 DAG 中读取真实的 source/target node ID、connection ID、table 名
+     * 来构建 Inspect.tasks[].source/target DTO. 之前用 connectionId/tableName 作为占位会导致
+     * TM 报 "inspectDataSource can not be null".
+     */
+    private Map<String, Object> buildInspectBody(TmInspectParameter p, ScenarioContext ctx) throws Exception {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("name", p.getName());
-        body.put("taskId", p.getTaskId());
-        body.put("agentType", p.getAgentType() != null ? p.getAgentType() : "Collect");
+        body.put("flowId", p.getTaskId());  // TM 内部字段叫 flowId!
 
-        // Platform info — required by Inspect API
+        // Agent: 只传 agentId, 不传 agentTags — TM 会从 agentId 自动填 agentTags
+        // 这样能确保 agentId 不被 agentTags 覆盖
+        if (p.getAgentId() != null && !p.getAgentId().isBlank()) {
+            body.put("agentId", p.getAgentId());
+        }
+        body.put("agentType", p.getAgentType() != null ? p.getAgentType() : "private");
+
+        body.put("mode", p.getMode() != null ? p.getMode() : "manual");
+        body.put("inspectMethod", p.getInspectMethod() != null ? p.getInspectMethod() : "row_count");
+        body.put("inspectDifferenceMode", p.getInspectDifferenceMode() != null ? p.getInspectDifferenceMode() : "All");
+
+        // Platform info
         Map<String, Object> platformInfo = new LinkedHashMap<>();
-        platformInfo.put("agentType", p.getAgentType() != null ? p.getAgentType() : "Collect");
-        platformInfo.put("taskId", p.getTaskId());
+        platformInfo.put("agentType", p.getAgentType() != null ? p.getAgentType() : "private");
         body.put("platformInfo", platformInfo);
 
-        // Source connection
-        Map<String, Object> sourceConn = new LinkedHashMap<>();
-        sourceConn.put("id", p.getSourceConnectionId());
-        body.put("sourceConnection", sourceConn);
-
-        // Target connection
-        Map<String, Object> targetConn = new LinkedHashMap<>();
-        targetConn.put("id", p.getTargetConnectionId());
-        body.put("targetConnection", targetConn);
-
-        // Tables to inspect
-        List<Map<String, Object>> tasks = new ArrayList<>();
-        List<String> tables = p.getTables();
-        if (tables != null && !tables.isEmpty()) {
-            for (String table : tables) {
-                Map<String, Object> task = new LinkedHashMap<>();
-                task.put("sourceTable", table);
-                task.put("targetTable", table);
-                task.put("inspectType", "all");
-                tasks.add(task);
-            }
-        } else {
-            // 空列表表示使用同步任务中的所有表
-            Map<String, Object> task = new LinkedHashMap<>();
-            task.put("inspectType", "all");
-            tasks.add(task);
-        }
-        body.put("tasks", tasks);
+        // 关键步骤: 从 sync task DAG 构建 inspect tasks
+        List<Map<String, Object>> inspectTasks = buildInspectTasksFromSyncTask(p);
+        body.put("tasks", inspectTasks);
 
         return body;
     }
 
+    /**
+     * 从同步任务 DAG 构建 Inspect.tasks 列表.
+     * <p>
+     * Inspect.tasks[].source/target 需要完整的 DTO:
+     * - connectionId, nodeId, table, nodeName, databaseType, sortColumn, inspectDataSource=true
+     */
+    private List<Map<String, Object>> buildInspectTasksFromSyncTask(TmInspectParameter p) throws Exception {
+        List<Map<String, Object>> result = new ArrayList<>();
+
+        // 1. GET 完整的 sync task DTO (从 TM)
+        JsonNode taskDto = client.get("/api/Task/" + p.getTaskId());
+        JsonNode dagNode = taskDto.get("dag");
+        if (dagNode == null || !dagNode.has("nodes")) {
+            throw new IllegalStateException("Sync task " + p.getTaskId() + " has no DAG nodes — cannot build Inspect");
+        }
+        JsonNode nodes = dagNode.get("nodes");
+        if (!nodes.isArray() || nodes.size() < 2) {
+            throw new IllegalStateException("Sync task DAG needs at least 2 nodes (source+target), got " + nodes.size());
+        }
+
+        // 2. DAG 顺序: nodes[0]=source, nodes[1]=target
+        JsonNode srcNode = nodes.get(0);
+        JsonNode tgtNode = nodes.get(1);
+
+        String srcConnId = text(srcNode, "connectionId");
+        String tgtConnId = text(tgtNode, "connectionId");
+        String srcNodeId = text(srcNode, "id");
+        String tgtNodeId = text(tgtNode, "id");
+        String srcTable = text(srcNode, "tableName");
+        String tgtTable = text(tgtNode, "tableName");
+        String srcDbType = text(srcNode, "databaseType");
+        String tgtDbType = text(tgtNode, "databaseType");
+        // 从 attrs 获取 connectionName
+        String srcConnName = text(srcNode.path("attrs"), "connectionName");
+        String tgtConnName = text(tgtNode.path("attrs"), "connectionName");
+
+        log.info("[TM] Building Inspect task: src(node={},conn={},table={}) → tgt(node={},conn={},table={})",
+                srcNodeId, srcConnId, srcTable, tgtNodeId, tgtConnId, tgtTable);
+
+        // 3. 如果 YAML 指定了 source/target_connection_id, 优先用 YAML 的 (应该和 DAG 一致)
+        if (p.getSourceConnectionId() != null && !p.getSourceConnectionId().isBlank()) {
+            srcConnId = p.getSourceConnectionId();
+        }
+        if (p.getTargetConnectionId() != null && !p.getTargetConnectionId().isBlank()) {
+            tgtConnId = p.getTargetConnectionId();
+        }
+
+        // 4. 如果 YAML 指定了具体 tables, 为每个 table 创建一个 inspect task
+        List<String> tables = p.getTables();
+        if (tables != null && !tables.isEmpty()) {
+            for (String table : tables) {
+                Map<String, Object> inspectTask = buildInspectTaskDTO(
+                        p.getTaskId(), srcNodeId, tgtNodeId,
+                        srcConnId, tgtConnId, srcConnName, tgtConnName,
+                        table, table,
+                        srcDbType, tgtDbType);
+                result.add(inspectTask);
+            }
+        } else {
+            // 自动用 DAG 里的 sourceTable/targetTable
+            Map<String, Object> inspectTask = buildInspectTaskDTO(
+                    p.getTaskId(), srcNodeId, tgtNodeId,
+                    srcConnId, tgtConnId, srcConnName, tgtConnName,
+                    srcTable, tgtTable,
+                    srcDbType, tgtDbType);
+            result.add(inspectTask);
+        }
+
+        return result;
+    }
+
+    /** 构建单个 InspectTask DTO. */
+    private Map<String, Object> buildInspectTaskDTO(
+            String flowTaskId,
+            String srcNodeId, String tgtNodeId,
+            String srcConnId, String tgtConnId, String srcConnName, String tgtConnName,
+            String srcTable, String tgtTable,
+            String srcDbType, String tgtDbType) {
+
+        Map<String, Object> source = new LinkedHashMap<>();
+        source.put("connectionId", srcConnId);
+        if (srcConnName != null) source.put("connectionName", srcConnName);
+        source.put("nodeId", srcNodeId);
+        source.put("nodeName", srcTable);
+        source.put("table", srcTable);
+        if (srcDbType != null) source.put("databaseType", srcDbType);
+        source.put("sortColumn", "_id");
+        source.put("inspectDataSource", true);
+        source.put("fields", new ArrayList<>());
+        source.put("isFilter", false);
+        source.put("conditions", new ArrayList<>());
+
+        Map<String, Object> target = new LinkedHashMap<>();
+        target.put("connectionId", tgtConnId);
+        if (tgtConnName != null) target.put("connectionName", tgtConnName);
+        target.put("nodeId", tgtNodeId);
+        target.put("nodeName", tgtTable);
+        target.put("table", tgtTable);
+        if (tgtDbType != null) target.put("databaseType", tgtDbType);
+        target.put("sortColumn", "_id");
+        target.put("inspectDataSource", true);
+        target.put("fields", new ArrayList<>());
+        target.put("isFilter", false);
+        target.put("conditions", new ArrayList<>());
+
+        Map<String, Object> inspectTask = new LinkedHashMap<>();
+        inspectTask.put("flowTaskId", flowTaskId);
+        inspectTask.put("source", source);
+        inspectTask.put("target", target);
+        inspectTask.put("inspectType", "all");
+        inspectTask.put("fullMatch", true);
+        inspectTask.put("script", "");
+        inspectTask.put("showAdvancedVerification", false);
+
+        return inspectTask;
+    }
+
     private static String text(JsonNode n, String key) {
-        return n.has(key) && !n.get(key).isNull() ? n.get(key).asText() : null;
+        return n != null && n.has(key) && !n.get(key).isNull() ? n.get(key).asText() : null;
     }
 }
