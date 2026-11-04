@@ -1702,3 +1702,316 @@ jobs:
 | **Phase 6 — 稳定性 Step + DSL 增强** | `steps/system_*` / `fault_inject_*` + `parallel` / `foreach` DSL 语法 | L3-S 场景可编排 |
 | **Phase 7 — 报告 + CI 集成** | JSON / JUnit XML / HTML 三格式报告 + GitHub Actions 模板 | RC 门禁链路打通 |
 | **Phase 8 — 全量 L3 场景落地** | 用 DSL 编写 wiki 登记的 L3-F-01~31 / L3-S-01~18 用例 | L3 框架完整交付 |
+
+---
+
+## 13. Phase 2 落地实现（2026-11）
+
+> **更新**：Phase 1-8 设计全部落地。核心增量——Prototype 实例管理、Preflight 双阶段前置校验、并发依赖预加载、CLI validate 全链路校验、Maven Resolver collect 超时兜底。远程服务器 (lg@113.98.206.142) 端到端验证通过。
+
+### 13.1 框架架构总图
+
+```mermaid
+flowchart LR
+    subgraph Entry["CLI 入口"]
+        A[L3CliApplication<br/>Picocli]
+    end
+
+    subgraph Core["tapdata-l3-core Runtime Engine"]
+        direction TB
+        P[PluginCenter<br/>Prototype Registry]
+        S[ScenarioRunner<br/>Preflight → Execute]
+        R[StepRunner × N<br/>sequential / parallel]
+        D[DslParser<br/>Parallel Independence]
+        M[MavenPluginResolver<br/>Concurrent Download + Timeout]
+    end
+
+    subgraph Steps["Step 实现层"]
+        T["tm_*  (11 actions)"]
+        G["dbforge_*  (租约创建)"]
+        J["jdbc_*  (init / write)"]
+        X["assert_jdbc_*"]
+    end
+
+    subgraph External["目标系统"]
+        Tm["TM REST API<br/>http://192.168.1.190:24021"]
+        Db["dbforge<br/>租约创建/释放"]
+        Mysql["TapData 集群<br/>MySQL→MySQL CDC"]
+    end
+
+    A -->|run / validate / describe| P
+    A -->|run| D
+    D --> S
+    P -->|preloadDependencies| M
+    M -->|concurrent jars + deps| P
+    P -->|getOrLoadAction → new instance| S
+    S -->|Step 迭代| R
+    R -->|handler.execute| Steps
+    T --> Tm
+    G --> Db
+    J --> Mysql
+    X --> Mysql
+```
+
+### 13.2 Preflight 双阶段前置校验
+
+执行阶段之前**一次性发现所有配置错误和依赖问题**，避免跑到一半才报错：
+
+```mermaid
+sequenceDiagram
+    participant CLI as CLI (run/validate)
+    participant Parser as DslParser
+    participant PC as PluginCenter
+    participant Resolver as MavenPluginResolver
+    participant Executor as parallelExecutor<br/>(CPU/2, min 8)
+    participant Steps as N Step Handlers
+
+    CLI->>Parser: parseDirectorySafe()
+    Parser-->>CLI: List of ScenarioConfig
+
+    rect rgb(240, 248, 255)
+        Note over PC, Resolver: Stage 1 — Preload 依赖预加载
+        CLI->>PC: preloadDependencies(steps)
+        PC->>PC: actionLoadPool<br/>并发 getOrLoadAction (per-coordinate 锁)
+        PC->>Resolver: resolveWithDependencies<br/>(downloadPool × 4 threads)
+        Resolver->>Resolver: 6 runtime JDBC driver jars 并发下载
+        Resolver->>Resolver: collectDependencies<br/>30s 超时 → 直退 fallback
+        Resolver-->>PC: List<Path> 所有 jar
+        PC-->>CLI: PreloadReport (OK / Errors)
+    end
+
+    rect rgb(255, 250, 240)
+        Note over Executor, Steps: Stage 2 — 并发校验
+        CLI->>Executor: submit all steps concurrently
+        loop 每个 Step
+            Executor->>Steps: handler.validate(StepConfig)<br/>框架级类型检查
+            Steps-->>Executor: List<String> 错误或 null
+        end
+        Executor-->>CLI: PreflightReport (OK / N 条错误)
+    end
+
+    alt Preflight 通过
+        CLI->>CLI: 进入 Step 执行循环
+    else Preflight 失败
+        CLI->>CLI: 统一报告所有错误<br/>不执行任何 Step
+    end
+```
+
+### 13.3 Parallel Block 并行执行
+
+```mermaid
+sequenceDiagram
+    participant Runner as ScenarioRunner
+    participant main as main Thread
+    participant pool as parallelExecutor Pool
+    participant worker1 as l3-parallel Worker-1
+    participant worker2 as l3-parallel Worker-2
+
+    Runner->>main: 串行 step 循环
+    main->>main: 顺序执行 serial_steps
+
+    main->>Runner: 遇到 parallel block → preflight 独立性校验 ✅
+    rect rgb(244, 255, 244)
+        Note over pool, worker2: parallel block 展开
+        main->>pool: 提交 2 个 Step 任务
+        pool->>worker1: 创建新 handler 实例
+        pool->>worker2: 创建新 handler 实例
+        par worker-1 线程
+            worker1->>worker1: tm_create_datasource<br/>TmCreateDatasourceAction@13754d1b
+        and worker-2 线程
+            worker2->>worker2: tm_create_datasource<br/>TmCreateDatasourceAction@1393d2a9
+        end
+        worker1-->>main: 完成 outputs → parallel_outputs_map
+        worker2-->>main: 完成 outputs → parallel_outputs_map
+    end
+
+    main->>main: 合并 parallel block outputs
+    main->>main: 继续后续 serial steps<br/>（可引用 parallel 内部 outputs ✅）
+```
+
+### 13.4 Prototype 实例管理
+
+同一个 `action` 被多个 Step 引用时，**每个 Step 拿到的是独立实例**（避免状态串扰）：
+
+```mermaid
+stateDiagram-v2
+    [*] --> Registry: PluginCenter init()
+    state Registry {
+        direction LR
+        StepPrototype: ActionHandlerPrototype<br/>(Class + URLClassLoader + runtimeDeps)
+        note right of StepPrototype
+            registry = Map<String, ActionHandlerPrototype>
+            不再存单例 ActionHandler 实例
+        end note
+    }
+
+    Registry --> Instance: getOrLoadAction("echo")
+    Instance --> Instance2: 第二个 Step 也 getOrLoadAction("echo")
+    Instance --> [*]
+    Instance2 --> [*]
+
+    state Instance {
+        direction TB
+        newInstance: tryInstantiateInCL(clazz, classLoader)
+        note right of newInstance
+            echo_step_1 → EchoAction@hash_A
+            echo_step_2 → EchoAction@hash_B
+            独立实例互不影响
+        end note
+    }
+
+    [*] --> Destroy: ScenarioRunner finally
+    Destroy --> ScenarioContext: destroyAllHandlers<br/>(usedHandlers collection)
+```
+
+### 13.5 分库管理场景 — L3 原生优势
+
+L3 的 **parallel block + dbforge leases + topology 参数 + 清理栈** 组合，是实现**一对多 / 多对一 / 分库分表拓扑**端到端验证的最低成本方案。
+
+#### 传统方案 vs L3 方案
+
+```mermaid
+flowchart TB
+    subgraph Traditional["传统集成测试方案（无 L3）"]
+        T1["每个用例手动脚本<br/>shell 或 Python"]
+        T2["数据库租约手工申请<br/>或复用固定库"]
+        T3["多库串行创建<br/>耗时 = N × 单库"]
+        T4["硬编码数据库地址"]
+        T5["手动清理 / 忘记清理"]
+        T1 --> T2 --> T3 --> T4 --> T5
+    end
+
+    subgraph L3Way["L3 方案 — 原生支持分库"]
+        L1["DSL 声明式 YAML"]
+        L2["dbforge_create_database<br/>parallel block"]
+        L3["N 个库并行创建<br/>耗时 ≈ 1 × 单库"]
+        L4["SpEL 跨 Step outputs 引用<br/>每个库 lease_id → tm_create_datasource"]
+        L5["parallel 再次批量建数据源"]
+        L6["tm_create_task(topology=one_to_many)<br/>单任务 N 个 sink"]
+        L7["自动清理栈 LIFO 释放"]
+        L1 --> L2 --> L3 --> L4 --> L5 --> L6 --> L7
+    end
+
+    Traditional -.->|"❌ 手动 + 慢 + 难维护"| L3Way
+```
+
+#### 典型一对多拓扑 DSL 片段
+
+```yaml
+steps:
+  # Step 1 — 并行创建 1 源 + N 目标
+  - parallel:
+      - id: src_db
+        action: dbforge_create_database
+        inputs: { db_type: mysql }
+        outputs: [lease_id, jdbc_url]
+      - id: sink_db_1
+        action: dbforge_create_database
+        inputs: { db_type: postgresql }
+        outputs: [lease_id, jdbc_url]
+      - id: sink_db_2
+        action: dbforge_create_database
+        inputs: { db_type: postgresql }
+        outputs: [lease_id, jdbc_url]
+      - id: sink_db_3
+        action: dbforge_create_database
+        inputs: { db_type: postgresql }
+        outputs: [lease_id, jdbc_url]
+
+  # Step 2 — 并行注册所有数据源
+  - parallel:
+      - id: register_src
+        action: tm_create_datasource
+        inputs:
+          uri: "#{ #steps['src_db'].outputs['jdbc_url'] }"
+        outputs: [connection_id]
+      - id: register_sink_1
+        action: tm_create_datasource
+        inputs:
+          uri: "#{ #steps['sink_db_1'].outputs['jdbc_url'] }"
+        outputs: [connection_id]
+      # ... sink_2, sink_3 同理
+
+  # Step 3 — 一次创建一对多任务（topology 参数）
+  - id: create_topology_task
+    action: tm_create_task
+    inputs:
+      source_connection_id: "#{ #steps['register_src'].outputs['connection_id'] }"
+      sink_connection_ids:
+        - "#{ #steps['register_sink_1'].outputs['connection_id'] }"
+        - "#{ #steps['register_sink_2'].outputs['connection_id'] }"
+        - "#{ #steps['register_sink_3'].outputs['connection_id'] }"
+      topology: "one_to_many"
+    outputs: [task_id]
+
+  # Step 4-5 — 执行同步 → CDC 注入 → VDC 校验 (复用黄金路径)
+
+  # 清理 — 自动 LIFO 释放 4 个数据库租约
+```
+
+#### 为什么 L3 特别适合分库管理
+
+| 能力 | L3 原生支持 | 对比传统方案 |
+|---|---|---|
+| **并行建库** | `parallel:` block + dbforge leases | 串行 shell 循环，N 库 × 单库耗时 |
+| **N 个 sink 一次性任务** | `topology: one_to_many` + sink_connection_ids 数组 | 每个 sink 要单独建任务或靠脚本拼 JSON |
+| **多类型混合拓扑** | 源 MySQL、目标 PostgreSQL/ClickHouse/MongoDB 并行租约 | shell/python 硬编码 driver / uri |
+| **清理安全性** | CleanupManager 栈式自动释放；Scenario 崩溃也 finally 保证 | 容易忘记清理，dbforge 租约堆积 |
+| **结果可复现** | 每次跑新鲜租约 + 唯一 run tag；DSL YAML 入库即 git-tracked | 固定库地址共享、状态污染 |
+| **独立实例隔离** | 每个 Step 拿到独立 handler 实例（Prototype 模式），无状态串扰 | 多个任务共享一个连接池对象 → 并发隐患 |
+
+### 13.6 CLI 使用指南
+
+```bash
+# 构建 → 部署 → 远程执行（完整流水线）
+./scripts/l3-remote.sh
+
+# 只构建
+./scripts/l3-remote.sh build
+
+# 只跑单个 case（指定新 run tag 避免名称冲突）
+RUN_TAG=gpdemo CASE_ID=L3-GP-MYSQL-CDC ./scripts/l3-remote.sh run
+
+# 本地 validate（全链路预校验：DSL + preload + handler.validate + 类型检查）
+java -jar tapdata-l3-cli-fat.jar validate \
+  --dir ./docs/cases \
+  --remote-repos=https://nexus.tapdata.net
+
+# 本地 run
+java -jar tapdata-l3-cli-fat.jar run \
+  --dir ./docs/cases \
+  --case-ids=L3-GP-MYSQL-CDC,L3-GP-MYSQL-LOCAL \
+  --remote-repos=https://nexus.tapdata.net \
+  --l3.plugin.download-concurrency=8   # 可选：并发下载线程数
+
+# 列出所有已注册 action（内置 + 外置）
+java -jar tapdata-l3-cli-fat.jar describe
+```
+
+### 13.7 Step 族注册表（Phase 2 完整清单）
+
+| Family | Action | 内置/外置 | 核心用途 |
+|---|---|---|---|
+| **tm** | `tm_login` | 外置 jar | 获取 access_token |
+| | `tm_create_datasource` | 外置 jar | 注册数据源（自动 cleanup）|
+| | `tm_test_connection` | 外置 jar | 连接健康检查 |
+| | `tm_create_task` | 外置 jar | 创建同步任务（支持 topology）|
+| | `tm_start_task` | 外置 jar | 启动任务 |
+| | `tm_wait_task` | 外置 jar | 轮询等待目标状态 |
+| | `tm_create_inspect` | 外置 jar | 创建 VDC 校验任务 |
+| | `tm_execute_inspect` | 外置 jar | 执行 VDC |
+| | `tm_assert_inspect_result` | 外置 jar | 断言 VDC 一致性 |
+| | `tm_stop_task` / `tm_delete_task` | 外置 jar | 清理 |
+| **dbforge** | `dbforge_create_database` | 外置 jar | 数据库租约创建（自动 cleanup）|
+| **jdbc** | `jdbc_init_source` | 外置 jar | 自动建表 + 批量写初始数据 |
+| | `jdbc_write_incremental` | 外置 jar | CDC 增量数据注入（INSERT/UPDATE/DELETE 混合）|
+| **assert_jdbc** | `assert_jdbc_data` | 外置 jar | 旁路 JDBC 断言 |
+| **内置** | `echo_test` / `sleep` | 内置 | 冒烟测试 / 并行验证 |
+
+### 13.8 配置项（Spring Boot relaxed binding）
+
+```properties
+# application.properties 或 --CLI-flags
+l3.plugin.download-concurrency=4         # Maven downloadPool + actionLoadPool 线程数
+l3.plugin.plugins-dir=~/.tap-l3/plugins  # PF4J 插件目录
+```
