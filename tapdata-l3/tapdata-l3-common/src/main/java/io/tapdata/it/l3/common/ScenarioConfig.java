@@ -36,7 +36,12 @@ public class ScenarioConfig {
     /** Optional description. */
     private String description;
 
-    /** User-declared variables — evaluated at scenario start. */
+    /** Scenario-scoped environment variables — injected into System Properties + ScenarioContext.
+     *  Used for cross-step shared config like TM_BASE_URL, DB_TYPE, etc.
+     *  In ActionHandler impls: System.getProperty("TM_BASE_URL") or SpEL #{ #env['TM_BASE_URL'] } */
+    private Map<String, String> env;
+
+    /** User-declared variables — evaluated at scenario start, available in SpEL via #{ #variables['key'] }. */
     private Map<String, Object> variables;
 
     /** Execution blocks — each is either StepConfig or ParallelBlock (C2 adds ForeachBlock). */

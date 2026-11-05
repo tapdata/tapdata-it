@@ -1,0 +1,32 @@
+# =============================================================================
+# L3 Env 注入测试 — 全局共享配置 demo
+# =============================================================================
+# 演示 DSL 顶层 env 字段:
+#   - TM_BASE_URL / TM_ACCESS_CODE → 所有 tm_* action 自动使用
+#   - SpEL 里用 #{ #env['KEY'] } 也能引用
+# =============================================================================
+
+case_id: "L3-ENV-TEST"
+scenario: "Env Injection Demo"
+description: "验证 DSL env 全局注入 —— System Properties + SpEL context"
+
+env:
+  TM_BASE_URL: "http://192.168.1.190:24021"
+  TM_ACCESS_CODE: "3324cfdf-7d3e-4792-bd32-571638d4562f"
+  AGENT_ID: "ca96cd0f-e7cc-41dd-a950-e10f89312b40"
+  DB_TYPE: "mysql"
+
+steps:
+  # Step 1 — tm_login 不写 inputs.access_code —— 从 env 拿默认值
+  - id: login_tm
+    action: tm_login
+    timeout_seconds: 30
+    # 故意不写 inputs.base_url / inputs.access_code —— 让 TmClient 从 System.getProperty("TM_BASE_URL") 读 env 注入
+    outputs: [tm_token, tm_base_url]
+
+  # Step 2 — 验证 env 也能在 SpEL 里引用 (两种访问方式: #env / #variables)
+  - id: echo_env_vars
+    action: echo
+    timeout_seconds: 10
+    inputs:
+      message: "#{ 'SpEL #env: TM_BASE_URL=' + #env['TM_BASE_URL'] + ' | #variables: DB_TYPE=' + #variables['DB_TYPE'] + ' | both keys merged: ' + #env['AGENT_ID'].substring(0,8) }"

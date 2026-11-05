@@ -136,6 +136,9 @@ public class DslParser {
         Map<String, Object> variables = (Map<String, Object>) root.get("variables");
         if (variables == null) variables = new LinkedHashMap<>();
 
+        // env — scenario-scoped shared config injected into System Properties + SpEL context
+        Map<String, String> env = parseEnvMap(root.get("env"), caseId);
+
         Object stepsRaw = root.get("steps");
         if (!(stepsRaw instanceof List<?> stepList) || stepList.isEmpty()) {
             throw new DslParseException(String.format(
@@ -166,9 +169,29 @@ public class DslParser {
                 .scenario(scenario)
                 .group(group)
                 .description(description)
+                .env(env)
                 .variables(variables)
                 .blocks(blocks)
                 .build();
+    }
+
+    /** Parse top-level env: map — all values coerced to String (numbers/booleans toString).
+     *  Non-Map or null → returns empty map (env is optional). */
+    @SuppressWarnings("unchecked")
+    private Map<String, String> parseEnvMap(Object raw, String caseId) {
+        Map<String, String> result = new LinkedHashMap<>();
+        if (!(raw instanceof Map<?, ?> rawMap)) return result;
+        for (Map.Entry<?, ?> e : rawMap.entrySet()) {
+            String key = String.valueOf(e.getKey());
+            if (e.getValue() == null) continue;
+            String val = String.valueOf(e.getValue());
+            result.put(key, val);
+        }
+        if (!result.isEmpty()) {
+            log.info("[DSL] Scenario '{}': parsed {} env variable(s) — will be injected into System Properties + SpEL context",
+                    caseId, result.size());
+        }
+        return result;
     }
 
     // ==================== Step parsing ====================

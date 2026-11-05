@@ -72,17 +72,40 @@ public class TmClient {
             }
         } catch (IOException ignored) {}
 
-        this.baseUrl = System.getProperty("tm.url",
-                System.getenv("TM_URL") != null ? System.getenv("TM_URL")
-                        : url != null ? url : DEFAULT_URL);
-        this.accessCode = System.getProperty("tm.access.code",
-                System.getenv("TM_ACCESS_CODE") != null ? System.getenv("TM_ACCESS_CODE")
-                        : accessCode != null ? accessCode : DEFAULT_ACCESS_CODE);
+        this.baseUrl = resolveConfig("tm.url",
+                new String[]{"TM_BASE_URL", "TM_URL"},
+                new String[]{"TM_URL"},
+                url, DEFAULT_URL);
+        this.accessCode = resolveConfig("tm.access.code",
+                new String[]{"TM_ACCESS_CODE"},
+                new String[]{"TM_ACCESS_CODE"},
+                accessCode, DEFAULT_ACCESS_CODE);
 
         this.http = HttpClient.newBuilder()
                 .connectTimeout(Duration.ofSeconds(10))
                 .build();
         log.info("[TM] Initialized: baseUrl={}", baseUrl);
+    }
+
+    /** Multi-layer config resolution — covers -D flag, DSL env (ScenarioRunner 注入), system env, config file, default.
+     *  lowerKey  — System.getProperty 小写 key (tm.url, 最高优先级)
+     *  propAliases — System.getProperty 大写别名 (TM_BASE_URL, TM_URL — DSL env 注入到 System Properties 的)
+     *  envAliases — System.getenv 大写别名 (TM_URL — OS 环境变量)
+     *  configFileValue — ~/.tapdata-tm 文件里读到的值 (可为 null)
+     *  defaultValue — 硬编码默认值 (兜底) */
+    private static String resolveConfig(String lowerKey, String[] propAliases, String[] envAliases,
+                                        String configFileValue, String defaultValue) {
+        String v;
+        if ((v = System.getProperty(lowerKey)) != null) return v;
+        for (String alias : propAliases) {
+            if ((v = System.getProperty(alias)) != null) return v;
+        }
+        for (String alias : envAliases) {
+            String env = System.getenv(alias);
+            if (env != null && !env.isBlank()) return env;
+        }
+        if (configFileValue != null && !configFileValue.isBlank()) return configFileValue;
+        return defaultValue;
     }
 
     // ==================== Auth ====================

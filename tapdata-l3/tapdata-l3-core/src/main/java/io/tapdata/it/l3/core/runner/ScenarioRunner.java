@@ -73,7 +73,27 @@ public class ScenarioRunner {
         log.info("================================================");
 
         ScenarioContext ctx = new ScenarioContext();
-        // Merge user-declared variables (override built-ins if same key)
+
+        // ============ Scenario-scoped env injection ============
+        // 注入 3 处，方便不同访问模式:
+        //  1. System.setProperty → ActionHandler 实现里 System.getProperty("TM_BASE_URL") 直接拿
+        //  2. ctx.setVariable(k, v) → SpEL 里 #{ #variables['TM_BASE_URL'] }
+        //  3. ctx.setVariable("env", envMap) → SpEL 里 #{ #env['TM_BASE_URL'] }
+        Map<String, String> envMap = scenario.getEnv();
+        if (envMap != null && !envMap.isEmpty()) {
+            log.info("[Scenario] Injecting {} env variable(s) into System Properties + ScenarioContext",
+                    envMap.size());
+            envMap.forEach((k, v) -> {
+                // 不覆盖 JVM 启动时 -D 已传的 property（System.getProperty 优先）
+                if (System.getProperty(k) == null) {
+                    System.setProperty(k, v);
+                }
+                ctx.setVariable(k, v);
+            });
+            ctx.setVariable("env", new java.util.HashMap<>(envMap));
+        }
+
+        // Merge user-declared variables (override env + built-ins if same key — variables 是场景私有临时变量)
         if (scenario.getVariables() != null) {
             scenario.getVariables().forEach(ctx::setVariable);
         }
