@@ -2035,6 +2035,150 @@ public abstract class ConnectorIT {
                 "unexpected new-field event from the DDL sequence: " + newFieldNames);
     }
 
+    @Test
+    @UnderTest(value = "streamRead", requiresVerifier = true)
+    void should_stream_read_ddl_dml_drop_ddl_dml_sequence() throws Throwable {
+        assumeTrue(supportsSourceDdlCapture(), "connector does not declare source DDL capture support, skip.");
+        StreamReadFunction streamRead = sourceDdlStreamReadFunction();
+        createTableIfNeeded();
+        prepareStreamReadTable();
+        TapTable table = buildTapTable();
+        registerTable(table);
+        Object offset = sourceDdlStreamOffset();
+        assertNotNull(offset, "timestampToStreamOffset should return non-null offset");
+
+        List<TapEvent> received = Collections.synchronizedList(new ArrayList<>());
+        CountDownLatch sequenceLatch = new CountDownLatch(1);
+        StreamReadConsumer consumer = StreamReadConsumer.create((events, off) -> {
+            received.addAll(events);
+            if (hasInterleavedDdlDmlSequence(received)) sequenceLatch.countDown();
+        });
+        AtomicReference<Throwable> streamReadError = new AtomicReference<>();
+        Thread reader = new Thread(() -> {
+            try {
+                streamRead.streamRead(nodeContext(), List.of(table.getId()), offset, 100, consumer);
+            } catch (Throwable t) {
+                streamReadError.set(t);
+            }
+        }, "tap-it-stream-read-ddl-dml-ddl-dml");
+        reader.setDaemon(true);
+        reader.start();
+        if (sourceDdlReportsStartedState()) {
+            long startDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(sourceDdlStartupTimeoutSeconds());
+            while (consumer.getState() != StreamReadConsumer.STATE_STREAM_READ_STARTED
+                    && streamReadError.get() == null && System.nanoTime() < startDeadline) {
+                Thread.sleep(50L);
+            }
+            assertEquals(StreamReadConsumer.STATE_STREAM_READ_STARTED, consumer.getState(), "streamRead did not report started state");
+        } else if (sourceDdlWaitForHeartbeat()) {
+            long startDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(sourceDdlStartupTimeoutSeconds());
+            while (!hasReceivedHeartbeat(received)
+                    && streamReadError.get() == null && System.nanoTime() < startDeadline) {
+                Thread.sleep(50L);
+            }
+            assertTrue(hasReceivedHeartbeat(received), "streamRead did not emit a heartbeat before the DDL sequence");
+        } else {
+            Thread.sleep(2_000L);
+        }
+        assertNull(streamReadError.get(), () -> "streamRead thread terminated before startup: " + describeThrowable(streamReadError.get()));
+
+        String tableName = spec.getTableName();
+        String addedField = sourceDdlInterleaveFieldName();
+        System.err.println("[IT] executing source DDL: " + sourceDdlInterleaveAddFieldStatement(tableName));
+        verifier().executeDdl(sourceDdlInterleaveAddFieldStatement(tableName));
+        List<Map<String, Object>> generatedRows = generateRows(2);
+        Map<String, Object> rowWithField = new LinkedHashMap<>(generatedRows.get(0));
+        String marker = "ddl-interleave-" + System.nanoTime();
+        rowWithField.put(addedField, marker);
+        verifier().insert(tableName, Collections.singletonList(rowWithField));
+
+        System.err.println("[IT] executing source DDL: " + sourceDdlInterleaveDropFieldStatement(tableName));
+        verifier().executeDdl(sourceDdlInterleaveDropFieldStatement(tableName));
+        for (String sql : sourceDdlAfterInterleaveDrop(tableName)) {
+            System.err.println("[IT] executing source DDL: " + sql);
+            verifier().executeDdl(sql);
+        }
+        Map<String, Object> rowAfterDrop = generatedRows.get(1);
+        verifier().insert(tableName, Collections.singletonList(rowAfterDrop));
+
+        boolean done = sequenceLatch.await(streamReadTimeoutSeconds() * 4, TimeUnit.SECONDS);
+        assertNull(streamReadError.get(), () -> "streamRead thread terminated with error: " + describeThrowable(streamReadError.get()));
+        assertTrue(done, "streamRead did not capture ADD -> DML -> DROP -> DML sequence, got: " + received);
+        List<TapEvent> snapshot;
+        synchronized (received) {
+            snapshot = new ArrayList<>(received);
+        }
+        int addIndex = findEventIndex(snapshot, TapNewFieldEvent.class, 0);
+        int firstInsertIndex = findInsertWithField(snapshot, addedField, marker);
+        int dropIndex = findEventIndex(snapshot, TapDropFieldEvent.class, firstInsertIndex + 1);
+        int secondInsertIndex = findInsertWithoutField(snapshot, addedField, dropIndex + 1);
+        assertTrue(addIndex >= 0 && addIndex < firstInsertIndex,
+                "new-field event must precede the DML that writes the added field: " + snapshot);
+        assertTrue(firstInsertIndex < dropIndex && dropIndex < secondInsertIndex,
+                "expected ADD -> DML -> DROP -> DML event order: " + snapshot);
+    }
+
+    protected String sourceDdlInterleaveFieldName() {
+        return "c_ddl_probe";
+    }
+
+    protected String sourceDdlInterleaveAddFieldStatement(String table) {
+        return sourceDdlStatements(table).get(0);
+    }
+
+    protected String sourceDdlInterleaveDropFieldStatement(String table) {
+        throw new UnsupportedOperationException("connector must provide a source DDL drop-field statement");
+    }
+
+    protected List<String> sourceDdlAfterInterleaveDrop(String table) {
+        return Collections.emptyList();
+    }
+
+    private boolean hasInterleavedDdlDmlSequence(List<TapEvent> events) {
+        List<TapEvent> snapshot;
+        synchronized (events) {
+            snapshot = new ArrayList<>(events);
+        }
+        int addIndex = findEventIndex(snapshot, TapNewFieldEvent.class, 0);
+        if (addIndex < 0) return false;
+        int insertIndex = findInsertWithField(snapshot, sourceDdlInterleaveFieldName(), null);
+        if (insertIndex <= addIndex) return false;
+        int dropIndex = findEventIndex(snapshot, TapDropFieldEvent.class, insertIndex + 1);
+        return dropIndex > insertIndex && findInsertWithoutField(snapshot, sourceDdlInterleaveFieldName(), dropIndex + 1) > dropIndex;
+    }
+
+    private int findEventIndex(List<TapEvent> events, Class<? extends TapEvent> type, int start) {
+        for (int i = Math.max(0, start); i < events.size(); i++) if (type.isInstance(events.get(i))) return i;
+        return -1;
+    }
+
+    private int findInsertWithField(List<TapEvent> events, String fieldName, String expectedValue) {
+        for (int i = 0; i < events.size(); i++) {
+            TapEvent event = events.get(i);
+            if (!(event instanceof TapInsertRecordEvent)) continue;
+            Map<String, Object> after = ((TapInsertRecordEvent) event).getAfter();
+            Object value = mapValueIgnoreCase(after, fieldName);
+            if (value != null && (expectedValue == null || expectedValue.equals(String.valueOf(value)))) return i;
+        }
+        return -1;
+    }
+
+    private int findInsertWithoutField(List<TapEvent> events, String fieldName, int start) {
+        for (int i = Math.max(0, start); i < events.size(); i++) {
+            TapEvent event = events.get(i);
+            if (event instanceof TapInsertRecordEvent
+                    && mapValueIgnoreCase(((TapInsertRecordEvent) event).getAfter(), fieldName) == null) return i;
+        }
+        return -1;
+    }
+
+    private Object mapValueIgnoreCase(Map<String, Object> values, String fieldName) {
+        for (Map.Entry<String, Object> entry : values.entrySet()) {
+            if (entry.getKey().equalsIgnoreCase(fieldName)) return entry.getValue();
+        }
+        return null;
+    }
+
     private boolean hasSourceDdlAndSentinel(List<TapEvent> events) {
         List<TapEvent> snapshot;
         synchronized (events) {
