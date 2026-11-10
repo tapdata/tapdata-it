@@ -2035,10 +2035,125 @@ public abstract class ConnectorIT {
                 "unexpected new-field event from the DDL sequence: " + newFieldNames);
     }
 
+    /** A single source ALTER must deliver both columns before DML using them. */
+    @Test
+    @UnderTest(value = "streamRead", requiresVerifier = true)
+    void should_stream_composite_add_columns_ddl() throws Throwable {
+        assumeTrue(supportsSourceDdlCapture(), "connector does not declare source DDL capture support");
+        String sql = sourceCompositeAddColumnsStatement(spec.getTableName());
+        assumeTrue(sql != null, "connector does not declare composite ADD syntax");
+        createTableIfNeeded();
+        prepareStreamReadTable();
+        TapTable table = buildTapTable();
+        registerTable(table);
+        Object offset = sourceDdlStreamOffset();
+        assertNotNull(offset, "source DDL offset must be available");
+        List<TapEvent> received = Collections.synchronizedList(new ArrayList<>());
+        AtomicReference<Throwable> error = new AtomicReference<>();
+        StreamReadConsumer consumer = StreamReadConsumer.create((events, ignored) -> received.addAll(events));
+        Thread reader = new Thread(() -> {
+            try {
+                sourceDdlStreamReadFunction().streamRead(nodeContext(), List.of(table.getId()), offset, 100, consumer);
+            } catch (Throwable failure) {
+                error.set(failure);
+            }
+        }, "tap-it-composite-source-ddl");
+        reader.setDaemon(true);
+        reader.start();
+        try {
+            long startup = System.nanoTime() + TimeUnit.SECONDS.toNanos(sourceDdlStartupTimeoutSeconds());
+            if (sourceDdlReportsStartedState() || sourceDdlWaitForHeartbeat()) {
+                while (error.get() == null && System.nanoTime() < startup
+                        && (sourceDdlReportsStartedState()
+                        ? consumer.getState() != StreamReadConsumer.STATE_STREAM_READ_STARTED
+                        : !hasReceivedHeartbeat(received))) Thread.sleep(50L);
+                assertNull(error.get(), () -> "stream startup failed: " + describeThrowable(error.get()));
+                assertTrue(sourceDdlReportsStartedState()
+                        ? consumer.getState() == StreamReadConsumer.STATE_STREAM_READ_STARTED
+                        : hasReceivedHeartbeat(received), "source stream did not start before composite DDL");
+            } else {
+                Thread.sleep(2_000L);
+            }
+            assertNull(error.get(), () -> "stream startup failed: " + describeThrowable(error.get()));
+            verifier().executeDdl(sql);
+            if (!sourceCompositeDdlVerifyDml()) {
+                long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(streamReadTimeoutSeconds() * 4);
+                List<TapEvent> snapshot;
+                do {
+                    synchronized (received) { snapshot = new ArrayList<>(received); }
+                    long columnCount = snapshot.stream().filter(TapNewFieldEvent.class::isInstance)
+                            .map(TapNewFieldEvent.class::cast).mapToLong(event -> event.getNewFields().size()).sum();
+                    if (columnCount >= 2 || error.get() != null) break;
+                    Thread.sleep(50L);
+                } while (System.nanoTime() < deadline);
+                assertNull(error.get(), () -> "composite DDL stream failed: " + describeThrowable(error.get()));
+                java.util.Set<String> names = new java.util.HashSet<>();
+                for (TapEvent receivedEvent : snapshot) {
+                    if (!(receivedEvent instanceof TapNewFieldEvent)) continue;
+                    TapNewFieldEvent event = (TapNewFieldEvent) receivedEvent;
+                    assertEquals(table.getId(), event.getTableId(), "composite DDL table identity");
+                    for (TapField field : event.getNewFields()) {
+                        assertNotNull(field.getDataType(), "added field must have a data type");
+                        assertTrue(names.add(field.getName().toLowerCase(java.util.Locale.ROOT)),
+                                "composite DDL must not duplicate a column");
+                    }
+                }
+                assertEquals(java.util.Set.of("c_composite_a", "c_composite_b"), names,
+                        "valid TapNewFieldEvent(s) must contain both columns");
+                return;
+            }
+            Map<String, Object> row = new LinkedHashMap<>(generateRows(1).get(0));
+            row.put("c_composite_a", "composite-marker");
+            row.put("c_composite_b", 42L);
+            verifier().insert(spec.getTableName(), Collections.singletonList(row));
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(streamReadTimeoutSeconds() * 4);
+            List<TapEvent> snapshot;
+            do {
+                synchronized (received) { snapshot = new ArrayList<>(received); }
+                if (findInsertWithField(snapshot, "c_composite_a", "composite-marker") >= 0 || error.get() != null) break;
+                Thread.sleep(50L);
+            } while (System.nanoTime() < deadline);
+            assertNull(error.get(), () -> "composite DDL stream failed: " + describeThrowable(error.get()));
+            int insertIndex = findInsertWithField(snapshot, "c_composite_a", "composite-marker");
+            assertTrue(insertIndex >= 0, "missing DML using the added columns: " + snapshot);
+            java.util.Set<String> names = new java.util.HashSet<>();
+            for (int i = 0; i < insertIndex; i++) {
+                if (!(snapshot.get(i) instanceof TapNewFieldEvent)) continue;
+                TapNewFieldEvent event = (TapNewFieldEvent) snapshot.get(i);
+                assertEquals(table.getId(), event.getTableId(), "composite DDL table identity");
+                for (TapField field : event.getNewFields()) {
+                    assertNotNull(field.getDataType(), "added field must have a data type");
+                    assertTrue(names.add(field.getName().toLowerCase(java.util.Locale.ROOT)),
+                            "composite DDL must not duplicate a column");
+                }
+            }
+            assertEquals(java.util.Set.of("c_composite_a", "c_composite_b"), names,
+                    "valid TapNewFieldEvent(s) must contain both columns before their DML");
+            Map<String, Object> after = ((TapInsertRecordEvent) snapshot.get(insertIndex)).getAfter();
+            assertEquals("42", String.valueOf(mapValueIgnoreCase(after, "c_composite_b")),
+                    "the second added column must retain its value");
+        } finally {
+            consumer.streamReadEnded();
+        }
+    }
+
+    /** Override only for fixtures whose composite regression verifies DDL capture alone. */
+    protected boolean sourceCompositeDdlVerifyDml() {
+        return true;
+    }
+
+    protected boolean supportsSourceDdlInterleaving() {
+        return supportsSourceDdlCapture();
+    }
+
+    protected String sourceCompositeAddColumnsStatement(String table) {
+        return null;
+    }
+
     @Test
     @UnderTest(value = "streamRead", requiresVerifier = true)
     void should_stream_read_ddl_dml_drop_ddl_dml_sequence() throws Throwable {
-        assumeTrue(supportsSourceDdlCapture(), "connector does not declare source DDL capture support, skip.");
+        assumeTrue(supportsSourceDdlInterleaving(), "connector does not declare source DDL capture support, skip.");
         StreamReadFunction streamRead = sourceDdlStreamReadFunction();
         createTableIfNeeded();
         prepareStreamReadTable();
