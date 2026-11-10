@@ -7,3 +7,7 @@
 *.ipr
 __pycache__/
 *.py[cod]
+
+# L3 deploy step：Helm 打包产物 & 本地临时 values
+tapdata-l3/steps/tapdata-l3-step-deploy/src/main/resources/helm/charts/*.tgz
+tapdata-l3/steps/tapdata-l3-step-deploy/src/main/resources/helm/values-*-tmp.yaml
