@@ -2,6 +2,7 @@ package io.tapdata.it.l3.core.step;
 
 import io.tapdata.it.l3.common.ScenarioContext;
 import io.tapdata.it.l3.common.StepConfig;
+import io.tapdata.it.l3.core.console.ConsoleUI;
 import io.tapdata.it.l3.plugin.step.BaseStep;
 import io.tapdata.it.l3.plugin.step.StepResult;
 import org.springframework.stereotype.Component;
@@ -25,7 +26,7 @@ public class EchoAction extends BaseStep {
     protected StepResult doExecute(StepConfig config, ScenarioContext ctx) throws Exception {
         Map<String, Object> inputs = config.getInputs();
         String message = inputs.getOrDefault("message", "").toString();
-        System.out.println("  [echo] " + message);
+        ConsoleUI.event("echo", message);
 
         // Build outputs
         Map<String, Object> outputs = new LinkedHashMap<>();

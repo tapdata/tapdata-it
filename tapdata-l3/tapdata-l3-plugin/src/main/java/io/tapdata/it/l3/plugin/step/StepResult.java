@@ -29,19 +29,31 @@ public class StepResult {
 
     // Factory used by StepRunner (captures timing + stepConfig)
     public static StepResult success(StepConfig stepConfig, long durationMs) {
+        return success(stepConfig, durationMs, Map.of());
+    }
+
+    public static StepResult success(StepConfig stepConfig, long durationMs,
+                                     Map<String, Object> outputs) {
         return StepResult.builder()
                 .stepConfig(stepConfig)
                 .success(true)
                 .durationMs(durationMs)
+                .outputs(outputs)
                 .build();
     }
 
     public static StepResult failure(StepConfig stepConfig, Throwable error, long durationMs) {
+        return failure(stepConfig, error, durationMs, Map.of());
+    }
+
+    public static StepResult failure(StepConfig stepConfig, Throwable error, long durationMs,
+                                     Map<String, Object> outputs) {
         return StepResult.builder()
                 .stepConfig(stepConfig)
                 .success(false)
                 .error(error)
                 .durationMs(durationMs)
+                .outputs(outputs)
                 .build();
     }
 }

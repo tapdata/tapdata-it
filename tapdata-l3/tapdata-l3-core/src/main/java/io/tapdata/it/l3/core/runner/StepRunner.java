@@ -2,6 +2,7 @@ package io.tapdata.it.l3.core.runner;
 
 import io.tapdata.it.l3.common.ScenarioContext;
 import io.tapdata.it.l3.common.StepConfig;
+import io.tapdata.it.l3.core.console.ConsoleUI;
 import io.tapdata.it.l3.core.plugin.PluginCenter;
 import io.tapdata.it.l3.core.plugin.PluginCenter.PluginLoadException;
 import io.tapdata.it.l3.plugin.ActionHandler;
@@ -12,6 +13,8 @@ import org.springframework.stereotype.Component;
 
 import java.time.Instant;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -43,9 +46,10 @@ public class StepRunner {
             Throwable err = new IllegalStateException(String.format(
                     "Step '%s' load failed: %s. Use `use` field or check steps-registry.yaml. Registry: %s",
                     stepConfig.getAction(), e.getMessage(), pluginCenter.getDefaultRegistry().keySet()), e);
-            log.error("[Step] '{}' → {} PluginLoadException: {}",
-                    stepConfig.getId(), stepConfig.getAction(), e.getMessage(), e);
-            return StepResult.failure(stepConfig, err, 0);
+            log.error("[Step] '{}' → {} load failed: {}", stepConfig.getId(),
+                    stepConfig.getAction(), e.getMessage());
+            log.debug("[Step] '{}' load failure detail", stepConfig.getId(), e);
+            return StepResult.failure(stepConfig, err, 0, Map.of());
         }
 
         // 注册本次独立 handler 实例到 scenario 级收集 —— 用于最终统一 destroy
@@ -58,14 +62,11 @@ public class StepRunner {
             int added = pluginCenter.addRuntimeDependencies(
                     stepConfig.getAction(), stepConfig.getExtraDeps());
             if (added > 0) {
-                log.info("[Step] '{}' → {}: loaded {} runtime dep jar(s) ({} declared by step + {} from DSL)",
-                        stepConfig.getId(), stepConfig.getAction(), added,
-                        handler.getRuntimeDependencies().size(),
-                        stepConfig.getExtraDeps() != null ? stepConfig.getExtraDeps().size() : 0);
+                ConsoleUI.event("deps", "+" + added + " jar(s) for " + stepConfig.getAction());
             }
         } catch (PluginCenter.PluginLoadException e) {
             return StepResult.failure(stepConfig, new IllegalStateException(
-                    "Failed to load runtime dependencies: " + e.getMessage(), e.getCause()), 0);
+                    "Failed to load runtime dependencies: " + e.getMessage(), e.getCause()), 0, Map.of());
         }
 
         // 3. SpEL 表达式求值
@@ -87,19 +88,29 @@ public class StepRunner {
         Instant start = Instant.now();
         long t0 = System.nanoTime();
         try {
-            log.info("[Step] Starting '{}' → {} (handler={}@{}) ...",
+            log.debug("[Step] Starting '{}' → {} (handler={}@{}) ...",
                     stepConfig.getId(), stepConfig.getAction(), handler.getClass().getSimpleName(),
                     Integer.toHexString(System.identityHashCode(handler)));
             handler.execute(resolved, ctx);
             long durationMs = (System.nanoTime() - t0) / 1_000_000;
-            log.info("[Step] '{}' → {} [SUCCESS] ({}ms)", stepConfig.getId(),
+            log.debug("[Step] '{}' → {} [SUCCESS] ({}ms)", stepConfig.getId(),
                     stepConfig.getAction(), durationMs);
-            return StepResult.success(stepConfig, durationMs);
+            return StepResult.success(stepConfig, durationMs, snapshotOutputs(stepConfig.getId(), ctx));
         } catch (Throwable t) {
             long durationMs = (System.nanoTime() - t0) / 1_000_000;
-            log.error("[Step] '{}' → {} [FAILED] ({}ms): {}", stepConfig.getId(),
-                    stepConfig.getAction(), durationMs, t.getMessage(), t);
-            return StepResult.failure(stepConfig, t, durationMs);
+            log.debug("[Step] '{}' → {} [FAILED] ({}ms)", stepConfig.getId(),
+                    stepConfig.getAction(), durationMs, t);
+            return StepResult.failure(stepConfig, t, durationMs,
+                    snapshotOutputs(stepConfig.getId(), ctx));
         }
+    }
+
+    /** 快照本 Step 注册到 ScenarioContext 的 outputs —— 供报告采集指标使用。 */
+    private static Map<String, Object> snapshotOutputs(String stepId, ScenarioContext ctx) {
+        if (stepId == null) return Map.of();
+        Map<String, Object> outputs = ctx.getSteps().get(stepId);
+        return outputs == null
+                ? Map.of()
+                : Collections.unmodifiableMap(new LinkedHashMap<>(outputs));
     }
 }
