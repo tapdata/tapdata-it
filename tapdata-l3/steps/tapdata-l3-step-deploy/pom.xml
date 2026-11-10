@@ -1,0 +1,37 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>io.tapdata.it.l3</groupId>
+        <artifactId>tapdata-l3</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>tapdata-l3-step-deploy</artifactId>
+    <packaging>jar</packaging>
+    <name>TapData L3 Step — Deploy</name>
+    <description>deploy_tapdata / undeploy_tapdata / scale / exec steps for remote K8s deployment</description>
+
+    <dependencies>
+        <!-- === SPI === BaseStep + StepResult + ActionHandler (zero Spring Boot) -->
+        <dependency>
+            <groupId>io.tapdata.it.l3</groupId>
+            <artifactId>tapdata-l3-plugin</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>io.tapdata.it.l3</groupId>
+            <artifactId>tapdata-l3-common</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+</project>

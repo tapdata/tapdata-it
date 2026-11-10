@@ -1,0 +1,61 @@
+global:
+  mongodb:
+    replicaSetName: tapdata-mongodb
+    protocol: mongodb
+    user: root
+    password: AbcDef123
+    authSource: admin
+    database: tapdata
+    hosts: "tapdata-mongodb-0.tapdata-mongodb-svc:27017,tapdata-mongodb-1.tapdata-mongodb-svc:27017,tapdata-mongodb-2.tapdata-mongodb-svc:27017"
+  imagePullSecret:
+    enabled: false
+    name: registry-auth
+    registry: ""
+    username: ""
+    password: ""
+  imagePullSecrets: []
+
+replicaCount: 2
+enabled: true
+
+image:
+  repository: tapdata8/tapdata
+  tag: latest
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  name: tapdata-api-svr
+  type: ClusterIP
+  port: 3080
+  targetPort: 3080
+  nodePort: 30803
+
+resources:
+  limits:
+    cpu: 1000m
+    memory: 2Gi
+  requests:
+    cpu: 250m
+    memory: 1Gi
+
+env:
+  module: apiserver
+  backendUrl: "http://tapdata-server-svr:3030/api/"
+  javaVersion: java17
+  tz: Asia/Shanghai
+  licenseHost: "113.98.206.142:18080"
+
+podAnnotations: {}
+
+podSecurityContext: {}
+
+securityContext: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

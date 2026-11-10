@@ -498,7 +498,7 @@ public class MavenPluginResolver {
                     conn.connect();
                     int code = conn.getResponseCode();
                     if (code != 200) {
-                        log.warn("[MavenPluginResolver] SNAPSHOT metadata HTTP {} from {}", code, metaUrl);
+                        log.debug("[MavenPluginResolver] SNAPSHOT metadata HTTP {} from {}", code, metaUrl);
                         continue;
                     }
                     try (java.io.InputStream is = conn.getInputStream()) {
@@ -514,7 +514,7 @@ public class MavenPluginResolver {
                         metaUrl, e.getClass().getSimpleName(), e.getMessage());
             }
         }
-        log.warn("[MavenPluginResolver] Could not resolve SNAPSHOT version for {} from any remote repo — try direct path",
+        log.debug("[MavenPluginResolver] Could not resolve SNAPSHOT version for {} from any remote repo — try direct path",
                 artifact);
         return null;
     }

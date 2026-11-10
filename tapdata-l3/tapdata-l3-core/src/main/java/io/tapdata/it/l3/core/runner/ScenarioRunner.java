@@ -8,11 +8,13 @@ import io.tapdata.it.l3.common.SafeSpelEvaluator;
 import io.tapdata.it.l3.common.SafeSpelEvaluator.SpelNullReferenceException;
 import io.tapdata.it.l3.common.exception.StepTimeoutException;
 import io.tapdata.it.l3.core.cleanup.CleanupManager;
+import io.tapdata.it.l3.core.console.ConsoleUI;
 import io.tapdata.it.l3.core.plugin.PluginCenter;
 import io.tapdata.it.l3.core.plugin.PluginCenter.PluginLoadException;
 import io.tapdata.it.l3.core.result.ScenarioResult;
 import io.tapdata.it.l3.plugin.ActionHandler;
 import io.tapdata.it.l3.plugin.step.StepResult;
+import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -20,6 +22,7 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
@@ -42,11 +45,13 @@ public class ScenarioRunner {
 
     private static final Logger log = LoggerFactory.getLogger(ScenarioRunner.class);
     private static final int PARALLEL_POOL_SIZE = Math.min(Runtime.getRuntime().availableProcessors(), 8);
+    private static final long HEARTBEAT_SECONDS = 30;
 
     private final StepRunner stepRunner;
     private final CleanupManager cleanupManager;
     private final PluginCenter pluginCenter;
     private final ExecutorService parallelExecutor;
+    private final ScheduledExecutorService heartbeatScheduler;
 
     public ScenarioRunner(StepRunner stepRunner, CleanupManager cleanupManager, PluginCenter pluginCenter) {
         this.stepRunner = stepRunner;
@@ -61,16 +66,25 @@ public class ScenarioRunner {
                     t.setDaemon(true);
                     return t;
                 });
+        this.heartbeatScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "l3-heartbeat");
+            t.setDaemon(true);
+            return t;
+        });
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        parallelExecutor.shutdownNow();
+        heartbeatScheduler.shutdownNow();
     }
 
     // ==================== Public API ====================
 
     public ScenarioResult execute(ScenarioConfig scenario) {
         Instant startTime = Instant.now();
-        log.info("================================================");
-        log.info("[Scenario] START '{}' (case_id={}, group={})",
+        log.debug("[Scenario] START '{}' (case_id={}, group={})",
                 scenario.getScenario(), scenario.getCaseId(), scenario.getGroup());
-        log.info("================================================");
 
         ScenarioContext ctx = new ScenarioContext();
 
@@ -81,8 +95,7 @@ public class ScenarioRunner {
         //  3. ctx.setVariable("env", envMap) → SpEL 里 #{ #env['TM_BASE_URL'] }
         Map<String, String> envMap = scenario.getEnv();
         if (envMap != null && !envMap.isEmpty()) {
-            log.info("[Scenario] Injecting {} env variable(s) into System Properties + ScenarioContext",
-                    envMap.size());
+            ConsoleUI.event("env", envMap.size() + " variable(s) loaded");
             envMap.forEach((k, v) -> {
                 // 不覆盖 JVM 启动时 -D 已传的 property（System.getProperty 优先）
                 if (System.getProperty(k) == null) {
@@ -102,26 +115,37 @@ public class ScenarioRunner {
         // 用 CopyOnWriteArrayList 是因为 parallel block 里的多线程会并发 add
         List<ActionHandler> usedHandlers = new CopyOnWriteArrayList<>();
 
+        // 所有已执行 Step 的结果 —— 供三格式测试报告采集耗时与指标
+        List<StepResult> stepResults = new CopyOnWriteArrayList<>();
+
         // ============ Preflight: 依赖预加载 + 并发校验 ============
         List<StepConfig> allSteps = collectAllSteps(scenario);
         if (!allSteps.isEmpty()) {
             // Stage 1: 统一下载所有依赖（提前暴露网络/下载问题）
+            ConsoleUI.event("deps", "preloading " + allSteps.size() + " step(s)...");
+            long preloadStart = System.currentTimeMillis();
             try {
                 pluginCenter.preloadDependencies(allSteps);
             } catch (PluginCenter.PluginLoadException ple) {
-                log.error("[Scenario] ❌ Preflight FAILED — dependency preload: {}", ple.getMessage());
+                ConsoleUI.error("dependency preload failed: " + ple.getMessage());
+                log.error("[Scenario] Preflight FAILED — dependency preload: {}", ple.getMessage());
                 cleanupManager.triggerTeardown();
                 pluginCenter.destroyAllHandlers(usedHandlers);
                 return ScenarioResult.failed(scenario,
                         StepResult.failure(new StepConfig(), ple, 0),
-                        Duration.between(startTime, Instant.now()).toMillis(), startTime, Instant.now());
+                        Duration.between(startTime, Instant.now()).toMillis(), startTime, Instant.now(),
+                        stepResults);
             }
+            ConsoleUI.event("deps", allSteps.size() + " step(s) ready ("
+                    + ConsoleUI.formatDuration(System.currentTimeMillis() - preloadStart) + ")");
 
             // Stage 2: 并发执行所有 handler.validate() + 框架级校验
+            long preflightStart = System.currentTimeMillis();
             PreflightReport report = runPreflightValidation(allSteps);
             if (!report.pass()) {
-                log.error("[Scenario] ❌ Preflight FAILED — {} error(s):", report.totalErrors());
-                report.printReport(log::error);
+                ConsoleUI.error("preflight failed: " + report.totalErrors() + " error(s)");
+                report.printReport(ConsoleUI::detail);
+                log.error("[Scenario] Preflight FAILED — {} error(s):", report.totalErrors());
                 cleanupManager.triggerTeardown();
                 pluginCenter.destroyAllHandlers(usedHandlers);
                 long failDurationMs = Duration.between(startTime, Instant.now()).toMillis();
@@ -129,11 +153,12 @@ public class ScenarioRunner {
                         StepResult.failure(new StepConfig(),
                                 new IllegalStateException("Preflight failed: " + report.totalErrors() + " error(s) — fix configuration and retry"),
                                 0),
-                        failDurationMs, startTime, Instant.now());
+                        failDurationMs, startTime, Instant.now(), stepResults);
             }
-            log.info("[Scenario] ✅ Preflight passed — {} step(s) ready to execute", allSteps.size());
+            ConsoleUI.event("preflight", allSteps.size() + " step(s) OK ("
+                    + ConsoleUI.formatDuration(System.currentTimeMillis() - preflightStart) + ")");
         } else {
-            log.warn("[Scenario] No steps found in scenario — will exit immediately");
+            ConsoleUI.warn("scenario has no steps — exiting immediately");
         }
 
         StepResult failure = null;
@@ -147,12 +172,14 @@ public class ScenarioRunner {
                 if (block instanceof StepConfig step) {
                     stepIndex++;
                     StepResult result = runWithProgress(step, stepIndex, totalSteps, ctx, usedHandlers);
+                    stepResults.add(result);
                     if (result.isSuccess()) continue;
                     failure = result;
                     break;
                 } else if (block instanceof ParallelBlock parallel) {
-                    stepIndex++; // treat whole parallel block as one progress tick
-                    StepResult result = runParallelBlock(parallel, stepIndex, totalSteps, ctx, usedHandlers);
+                    int startIndex = stepIndex + 1;
+                    stepIndex += parallel.getSteps().size();
+                    StepResult result = runParallelBlock(parallel, startIndex, totalSteps, ctx, usedHandlers, stepResults);
                     if (result != null && !result.isSuccess()) {
                         failure = result;
                         break;
@@ -165,25 +192,30 @@ public class ScenarioRunner {
             log.error("[Scenario] Step '{}' timed out after {} seconds", te.getStepId(), te.getTimeoutSeconds(), te);
             durationMs = Duration.between(startTime, Instant.now()).toMillis();
             cleanupManager.triggerTeardown();
-            return ScenarioResult.failed(scenario,
-                    StepResult.failure(StepConfig.builder().id(te.getStepId()).build(), te, 0),
-                    durationMs, startTime, Instant.now());
+            StepResult timeoutResult = StepResult.failure(
+                    StepConfig.builder().id(te.getStepId()).build(), te, 0);
+            stepResults.add(timeoutResult);
+            return ScenarioResult.failed(scenario, timeoutResult,
+                    durationMs, startTime, Instant.now(), stepResults);
         } catch (SpelNullReferenceException sre) {
             log.error("[Scenario] SpEL null-safety failure: {}", sre.getMessage());
             durationMs = Duration.between(startTime, Instant.now()).toMillis();
             cleanupManager.triggerTeardown();
-            return ScenarioResult.failed(scenario,
-                    StepResult.failure(new StepConfig(), sre, 0),
-                    durationMs, startTime, Instant.now());
+            StepResult spelResult = StepResult.failure(new StepConfig(), sre, 0);
+            stepResults.add(spelResult);
+            return ScenarioResult.failed(scenario, spelResult,
+                    durationMs, startTime, Instant.now(), stepResults);
         } catch (Exception unexpected) {
             log.error("[Scenario] Unexpected failure: {}", unexpected.getMessage(), unexpected);
             durationMs = Duration.between(startTime, Instant.now()).toMillis();
             cleanupManager.triggerTeardown();
-            return ScenarioResult.failed(scenario,
-                    StepResult.failure(new StepConfig(), unexpected, 0),
-                    durationMs, startTime, Instant.now());
+            StepResult unexpectedResult = StepResult.failure(new StepConfig(), unexpected, 0);
+            stepResults.add(unexpectedResult);
+            return ScenarioResult.failed(scenario, unexpectedResult,
+                    durationMs, startTime, Instant.now(), stepResults);
         } finally {
             // 1. ScenarioContext 里的 cleanup hooks（ctx.registerCleanup 注册的）
+            transferContextCleanups(ctx);
             cleanupManager.triggerTeardown();
             // 2. 所有已注册 ActionHandler 的 destroy() —— 整个 scenario 结束时的资源清理
             //    这里 destroy 的是本次 scenario 执行过的所有**独立** handler 实例
@@ -193,38 +225,72 @@ public class ScenarioRunner {
 
         Instant endTime = Instant.now();
         if (failure != null) {
-            log.error("[Scenario] FAILED '{}' — step '{}' ({}) failed after {}ms",
-                    scenario.getScenario(), failure.getStepConfig().getId(),
-                    failure.getStepConfig().getAction(), durationMs);
-            return ScenarioResult.failed(scenario, failure, durationMs, startTime, endTime);
+            log.debug("[Scenario] FAILED '{}' — step '{}' ({}) failed after {}ms",
+                    scenario.getScenario(),
+                    failure.getStepConfig() == null ? "?" : failure.getStepConfig().getId(),
+                    failure.getStepConfig() == null ? "?" : failure.getStepConfig().getAction(),
+                    durationMs);
+            return ScenarioResult.failed(scenario, failure, durationMs, startTime, endTime, stepResults);
         }
 
-        log.info("[Scenario] PASSED '{}' in {}ms", scenario.getScenario(), durationMs);
-        return ScenarioResult.success(scenario, durationMs, startTime, endTime);
+        log.debug("[Scenario] PASSED '{}' in {}ms", scenario.getScenario(), durationMs);
+        return ScenarioResult.success(scenario, durationMs, startTime, endTime, stepResults);
+    }
+
+    /**
+     * Moves ScenarioContext cleanup hooks into the CleanupManager.
+     * {@code removeLast()} walks bottom → top so the manager's LIFO stack
+     * still runs hooks in reverse registration order.
+     */
+    private void transferContextCleanups(ScenarioContext ctx) {
+        Deque<Runnable> hooks = ctx.getCleanupStack();
+        while (!hooks.isEmpty()) {
+            cleanupManager.register(hooks.removeLast());
+        }
     }
 
     // ==================== Sequential step execution ====================
 
     private StepResult runWithProgress(StepConfig step, int index, int total, ScenarioContext ctx,
                                        List<ActionHandler> usedHandlers) {
-        log.info("[Step {}/{}] {} → {} ...", index, total, step.getId(), step.getAction());
-        StepResult result = stepRunner.run(step, ctx, usedHandlers);
-        if (!result.isSuccess()) {
-            log.error("[Step {}/{}] {} → {} ... [FAILED] ({}ms)",
-                    index, total, step.getId(), step.getAction(), result.getDurationMs());
-        } else {
-            log.info("[Step {}/{}] {} → {} ... [SUCCESS] ({}ms)",
-                    index, total, step.getId(), step.getAction(), result.getDurationMs());
+        ConsoleUI.stepStart(index, total, step);
+        long startedAt = System.currentTimeMillis();
+        ScheduledFuture<?> heartbeat = heartbeatScheduler.scheduleAtFixedRate(
+                () -> ConsoleUI.heartbeat(index, total, step.getId(),
+                        System.currentTimeMillis() - startedAt),
+                HEARTBEAT_SECONDS, HEARTBEAT_SECONDS, TimeUnit.SECONDS);
+        StepResult result;
+        try {
+            result = stepRunner.run(step, ctx, usedHandlers);
+        } finally {
+            heartbeat.cancel(false);
         }
+        ConsoleUI.stepEnd(index, total, result);
         return result;
     }
 
     // ==================== Parallel block execution ====================
 
     private StepResult runParallelBlock(ParallelBlock block, int index, int total, ScenarioContext ctx,
-                                        List<ActionHandler> usedHandlers) {
-        List<CompletableFuture<StepResult>> futures = new ArrayList<>();
+                                        List<ActionHandler> usedHandlers,
+                                        List<StepResult> collectedResults) {
+        int stepCount = block.getSteps().size();
+        boolean singleStep = stepCount == 1;
+        if (singleStep) {
+            ConsoleUI.stepStart(index, total, block.getSteps().get(0));
+        } else {
+            ConsoleUI.parallelStart(index, total, stepCount);
+        }
+        String heartbeatLabel = singleStep
+                ? block.getSteps().get(0).getId()
+                : "parallel block (" + stepCount + " steps)";
+        long startedAt = System.currentTimeMillis();
+        ScheduledFuture<?> heartbeat = heartbeatScheduler.scheduleAtFixedRate(
+                () -> ConsoleUI.heartbeat(index, total, heartbeatLabel,
+                        System.currentTimeMillis() - startedAt),
+                HEARTBEAT_SECONDS, HEARTBEAT_SECONDS, TimeUnit.SECONDS);
 
+        List<CompletableFuture<StepResult>> futures = new ArrayList<>();
         for (StepConfig step : block.getSteps()) {
             CompletableFuture<StepResult> future = CompletableFuture.supplyAsync(
                     () -> stepRunner.run(step, ctx, usedHandlers), parallelExecutor);
@@ -236,10 +302,13 @@ public class ScenarioRunner {
                     .thenApply(v -> futures.stream().map(CompletableFuture::join).toList())
                     .get();
 
+            collectedResults.addAll(results);
+            for (int i = 0; i < results.size(); i++) {
+                ConsoleUI.stepEnd(index + i, total, results.get(i));
+            }
             for (StepResult r : results) {
                 if (!r.isSuccess()) return r;
             }
-            log.info("[Step {}/{}] parallel({} steps) ... [SUCCESS]", index, total, block.getSteps().size());
             return null; // all success
         } catch (CompletionException | ExecutionException e) {
             Throwable cause = e.getCause();
@@ -249,6 +318,8 @@ public class ScenarioRunner {
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
             throw new CompletionException(ie);
+        } finally {
+            heartbeat.cancel(false);
         }
     }
 

@@ -1,0 +1,23 @@
+apiVersion: v2
+name: tapdata
+description: A Helm chart for deploying TapData on Kubernetes
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+dependencies:
+  - name: mongodb
+    version: 1.0.0
+    repository: "file://charts/mongodb"
+    condition: mongodb.enabled
+  - name: tapdata-server
+    version: 1.0.0
+    repository: "file://charts/tapdata-server"
+    condition: tapdata-server.enabled
+  - name: tapdata-engine
+    version: 1.0.0
+    repository: "file://charts/tapdata-engine"
+    condition: tapdata-engine.enabled
+  - name: tapdata-apiserver
+    version: 1.0.0
+    repository: "file://charts/tapdata-apiserver"
+    condition: tapdata-apiserver.enabled

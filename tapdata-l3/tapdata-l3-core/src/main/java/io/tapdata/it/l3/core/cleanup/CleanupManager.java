@@ -1,5 +1,6 @@
 package io.tapdata.it.l3.core.cleanup;
 
+import io.tapdata.it.l3.core.console.ConsoleUI;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -33,7 +34,8 @@ public class CleanupManager {
             log.debug("[Cleanup] No actions registered — nothing to tear down");
             return;
         }
-        log.info("[Cleanup] Triggering teardown of {} registered resources...", stack.size());
+        int total = stack.size();
+        ConsoleUI.event("cleanup", total + " resource(s)");
         int failures = 0;
         while (!stack.isEmpty()) {
             Runnable action = stack.pop();
@@ -41,11 +43,13 @@ public class CleanupManager {
                 action.run();
             } catch (Throwable t) {
                 failures++;
-                log.warn("[Cleanup] Cleanup action failed: {}", t.getMessage(), t);
+                ConsoleUI.warn("cleanup failed: " + t.getMessage());
+                log.debug("[Cleanup] Cleanup action failed", t);
             }
         }
-        log.info("[Cleanup] Teardown complete — {} failed out of {}", failures,
-                failures + (stack.isEmpty() ? 0 : stack.size()));
+        ConsoleUI.event("cleanup", failures == 0
+                ? "done"
+                : "done (" + failures + "/" + total + " failed)");
     }
 
     public synchronized int size() {

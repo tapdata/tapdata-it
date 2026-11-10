@@ -18,5 +18,6 @@
     <module>tapdata-l3-step-tm</module>
     <module>tapdata-l3-step-assert-jdbc</module>
     <module>tapdata-l3-step-jdbc</module>
+    <module>tapdata-l3-step-deploy</module>
 </modules>
 </project>

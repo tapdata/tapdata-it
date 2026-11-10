@@ -1,0 +1,171 @@
+global:
+  imageRegistry: ""
+  imagePullSecret:
+    # Enable to create a docker-registry Secret for image pull authentication.
+    # When enabled, a Secret of type kubernetes.io/dockerconfigjson will be created.
+    # When disabled, no Secret is created and imagePullSecrets will be empty.
+    enabled: false
+    # Name of the created Secret.
+    name: registry-auth
+    # Registry server URL (e.g., swr.ap-southeast-1.myhuaweicloud.com)
+    registry: ""
+    # Registry login credentials
+    username: ""
+    password: ""
+  # Auto-populated: references the Secret name when imagePullSecret.enabled is true.
+  # Can also be set manually to reference existing Secrets.
+  imagePullSecrets: []
+  # MongoDB connection configuration shared across all TapData components.
+  mongodb:
+    replicaSetName: tapdata-mongodb
+    protocol: mongodb
+    user: root
+    password: AbcDef123
+    authSource: admin
+    database: tapdata
+    hosts: "tapdata-mongodb-0.tapdata-mongodb-svc:27017,tapdata-mongodb-1.tapdata-mongodb-svc:27017,tapdata-mongodb-2.tapdata-mongodb-svc:27017"
+
+# Ingress configuration for external access.
+# Disabled by default; enable and configure annotations per cloud provider.
+# Examples:
+#   Huawei CCE: set kubernetes.io/elb.id annotation
+#   AWS EKS: set alb.ingress.kubernetes.io/* annotations with ALB controller
+#   Generic Nginx: set kubernetes.io/ingress.class or ingressClassName
+ingress:
+  enabled: false
+  name: ""
+  # Ingress class name (e.g., nginx, alb)
+  className: ""
+  pathType: ImplementationSpecific
+  # Platform-specific annotations.
+  # Huawei CCE example:
+  #   kubernetes.io/elb.id: <your-elb-id>
+  #   kubernetes.io/elb.port: "80"
+  # AWS EKS example:
+  #   alb.ingress.kubernetes.io/scheme: internet-facing
+  #   alb.ingress.kubernetes.io/target-type: ip
+  annotations: {}
+  # External hostname or IP for the Ingress rule.
+  # Leave empty to match any host.
+  host: ""
+  # TLS configuration (optional)
+  tls: []
+  #  - hosts:
+  #      - tapdata.example.com
+  #    secretName: tapdata-tls
+
+# Prerequisites: MongoDB Community Operator must be pre-installed in the cluster.
+# Install it before deploying TapData:
+#   helm repo add mongodb https://mongodb.github.io/helm-charts
+#   helm install community-operator mongodb/community-operator --namespace mongodb --create-namespace
+#   helm install community-operator-crds mongodb/community-operator-crds --namespace mongodb
+
+mongodb:
+  nameOverride: "mongodb"
+  fullnameOverride: "mongodb"
+  replicaSet:
+    name: tapdata-mongodb
+    members: 3
+    version: "6.0.5-ubi8"
+    security:
+      authentication:
+        modes:
+          - SCRAM
+    users:
+      - db: admin
+        name: root
+        passwordSecretRef:
+          name: mongodb-admin-password
+        scramCredentialsSecretName: scram
+        roles:
+          - db: admin
+            name: root
+    additionalMongodConfig:
+      storage.wiredTiger.engineConfig.journalCompressor: zlib
+    statefulSet:
+      volumeClaimTemplates:
+        - name: data-volume
+          storageClassName: ""
+          accessModes:
+            - ReadWriteOnce
+          storage: 10Gi
+        - name: logs-volume
+          storageClassName: ""
+          accessModes:
+            - ReadWriteOnce
+          storage: 2Gi
+
+tapdata-server:
+  replicaCount: 1
+  image:
+    repository: tapdata8/tapdata
+    tag: latest
+    kubectlRepository: bitnami/kubectl
+    kubectlTag: latest
+    pullPolicy: IfNotPresent
+  service:
+    name: tapdata-server-svr
+    type: ClusterIP
+    port: 3030
+    targetPort: 3030
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+    requests:
+      cpu: 500m
+      memory: 2Gi
+  env:
+    module: frontend
+    frontendWorkerCount: 1
+    backendUrl: "http://tapdata-server-svr:3030/api/"
+    javaVersion: java17
+    tz: Asia/Shanghai
+    licenseHost: "113.98.206.142:18080"
+    license: "P3reDOP8DjonvFtUC6u/bIkgS7e7KMLArRmFIj378qWBbOxoyhiAa/8/lKS5Yb8BlUez0xBJad057PdU8R1oncFYuT+Vtmpidk08cy1Ytsrcf/7WdLE8e0lGdBzlVJqVg2mpl9ZM+IFjKkd76gr94gEYE0aJL44ZkQsJGnq3bNFCHm5EHMz44GfBGj23CdGuJAxVmHiHioapMiMAJyPXWk4bWX2VqZ3ffEwNLnM7ACkfTCzvPiXAbRYrtsLfzeFJ.A2cmWlNrntIoUChrH9Rhb7X41bhod56i4R4KZitoQXTU/A90FtNXYs4vIUd387/9XIPLlHz5H3me59GrZAzZF2H25KwXwFGjSl1TbowMDvLj4bRWYW6/Uh4R7dXxBxDCFyHQVh0y2R+5XRplA80uFsm8NdwO1xbUJtR8gvfOuJ4fNYDeojaJs65VVgbR2dgxDpeJOwtvbc7BFTIs48xTgILBE64mmYBQti9wmPDbxWyofL/XdEow/aLXDx7+CKxkh72GwBzO6DZwcqdTRPriat2B2AyEmsQSXuNHGCMSZBygMF6ZgAjNItq9RwR5yXsj2BGHJd8kz9JDYZ1Lxa/YeA=="
+
+tapdata-engine:
+  replicaCount: 2
+  image:
+    repository: tapdata8/tapdata
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+    requests:
+      cpu: 500m
+      memory: 2Gi
+  env:
+    module: backend
+    backendUrl: "http://tapdata-server-svr:3030/api/"
+    javaVersion: java17
+    tz: Asia/Shanghai
+    licenseHost: "113.98.206.142:18080"
+
+tapdata-apiserver:
+  enabled: true
+  replicaCount: 2
+  image:
+    repository: tapdata8/tapdata
+    tag: latest
+    pullPolicy: IfNotPresent
+  service:
+    name: tapdata-api-svr
+    type: ClusterIP
+    port: 3080
+    targetPort: 3080
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+    requests:
+      cpu: 250m
+      memory: 1Gi
+  env:
+    module: apiserver
+    backendUrl: "http://tapdata-server-svr:3030/api/"
+    javaVersion: java17
+    tz: Asia/Shanghai
+    licenseHost: "113.98.206.142:18080"

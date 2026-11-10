@@ -1,0 +1,45 @@
+apiVersion: mongodbcommunity.mongodb.com/v1
+kind: MongoDBCommunity
+metadata:
+  name: {{ .Values.replicaSet.name }}
+  labels:
+    {{- include "mongodb.labels" . | nindent 4 }}
+spec:
+  members: {{ .Values.replicaSet.members }}
+  type: ReplicaSet
+  version: {{ .Values.replicaSet.version | quote }}
+  security:
+    authentication:
+      modes:
+        {{- toYaml .Values.replicaSet.security.authentication.modes | nindent 8 }}
+  users:
+    {{- range .Values.replicaSet.users }}
+    - db: {{ .db }}
+      name: {{ .name }}
+      passwordSecretRef:
+        name: {{ .passwordSecretRef.name }}
+      scramCredentialsSecretName: {{ .scramCredentialsSecretName }}
+      roles:
+        {{- range .roles }}
+        - db: {{ .db }}
+          name: {{ .name }}
+        {{- end }}
+    {{- end }}
+  additionalMongodConfig:
+    {{- toYaml .Values.replicaSet.additionalMongodConfig | nindent 4 }}
+  statefulSet:
+    spec:
+      volumeClaimTemplates:
+        {{- range .Values.replicaSet.statefulSet.volumeClaimTemplates }}
+        - metadata:
+            name: {{ .name }}
+          spec:
+            {{- if .storageClassName }}
+            storageClassName: {{ .storageClassName }}
+            {{- end }}
+            accessModes:
+              {{- toYaml .accessModes | nindent 14 }}
+            resources:
+              requests:
+                storage: {{ .storage }}
+        {{- end }}

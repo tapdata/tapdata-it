@@ -1,0 +1,118 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tapdata-server.fullname" . }}
+  labels:
+    {{- include "tapdata-server.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "tapdata-server.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "tapdata-server.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "tapdata-server.fullname" . }}-wait-mdb
+      {{- if .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml .Values.global.imagePullSecrets | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if hasKey .Values "initContainers" }}
+      {{- with .Values.initContainers }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- else }}
+      initContainers:
+        - name: wait-for-mongodb
+          image: {{ include "tapdata-server.kubectlImage" . | quote }}
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for MongoDB replica set '{{ .Values.global.mongodb.replicaSetName }}' to be ready..."
+              until kubectl get mongodbcommunity {{ .Values.global.mongodb.replicaSetName }} -n {{ .Release.Namespace }} -o jsonpath='{.status.phase}' 2>/dev/null | grep -q "Running"; do
+                PHASE=$(kubectl get mongodbcommunity {{ .Values.global.mongodb.replicaSetName }} -n {{ .Release.Namespace }} -o jsonpath='{.status.phase}' 2>/dev/null || echo "not found")
+                echo "MongoDB replica set status: ${PHASE}, waiting for 'Running'..."
+                sleep 10
+              done
+              echo "MongoDB replica set is Running, starting TapData Server..."
+      {{- end }}
+      containers:
+        - name: tapdata-server
+          image: {{ include "tapdata-server.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 3030
+              protocol: TCP
+          env:
+            - name: MODULE
+              value: "{{ .Values.env.module }}"
+            - name: MONGODB_CONNECTION_STRING
+              value: "{{ .Values.global.mongodb.hosts }}/{{ .Values.global.mongodb.database }}?authSource={{ .Values.global.mongodb.authSource }}"
+            - name: BACKENDURL
+              value: "{{ .Values.env.backendUrl }}"
+            - name: FRONTEND_WORKER_COUNT
+              value: "{{ .Values.env.frontendWorkerCount }}"
+            - name: JAVA_VERSION
+              value: "{{ .Values.env.javaVersion }}"
+            - name: TZ
+              value: "{{ .Values.env.tz }}"
+            - name: LICENSE_HOST
+              value: "{{ .Values.env.licenseHost }}"
+            - name: TAPDATA_WORK_DIR
+              value: "/tapdata/apps"
+            - name: MONGODB_PASSWORD
+              value: "{{ .Values.global.mongodb.password }}"
+            - name: MONGODB_USER
+              value: "{{ .Values.global.mongodb.user }}"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 90
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /tapdata/apps/license.txt
+              subPath: license.txt
+            - name: logs
+              mountPath: /tapdata/apps/logs
+          command:
+            - /tapdata/docker-entrypoint.sh
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "tapdata-server.fullname" . }}-config
+            items:
+              - key: license.txt
+                path: license.txt
+        - name: logs
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

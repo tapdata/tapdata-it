@@ -1,0 +1,137 @@
+global:
+  imageRegistry: "{{IMAGE_REGISTRY}}"
+  imagePullSecret:
+    enabled: {{IMAGE_PULL_SECRET_ENABLED}}
+    name: "{{IMAGE_PULL_SECRET_NAME}}"
+    registry: "{{IMAGE_PULL_SECRET_REGISTRY}}"
+    username: "{{IMAGE_PULL_SECRET_USERNAME}}"
+    password: "{{IMAGE_PULL_SECRET_PASSWORD}}"
+  # imagePullSecrets references the Secret name(s) to use for pulling images.
+  # When imagePullSecret.enabled is true, this should reference the created Secret.
+  # When using external Secrets (e.g., cloud provider default), set this directly.
+  # Format: JSON array like [{"name": "secret1"}, {"name": "secret2"}]
+  imagePullSecrets: {{IMAGE_PULL_SECRETS_ARRAY}}
+  mongodb:
+    replicaSetName: tapdata-mongodb
+    protocol: mongodb
+    user: "{{MONGODB_USER}}"
+    password: "{{MONGODB_PASSWORD}}"
+    authSource: admin
+    database: tapdata
+    hosts: "{{MONGODB_HOSTS}}"
+
+# Ingress configuration is provided by cloud-specific values files:
+# - values-ingress-huaweicloud.yaml (Huawei Cloud CCE)
+# - values-ingress-aws.yaml (AWS EKS)
+# These files are automatically merged during helm install based on cloud provider.
+
+mongodb:
+  nameOverride: "mongodb"
+  fullnameOverride: "mongodb"
+  replicaSet:
+    name: tapdata-mongodb
+    members: {{MONGODB_MEMBERS}}
+    version: "6.0.5-ubi8"
+    security:
+      authentication:
+        modes:
+          - SCRAM
+    users:
+      - db: admin
+        name: root
+        passwordSecretRef:
+          name: mongodb-admin-password
+        scramCredentialsSecretName: scram
+        roles:
+          - db: admin
+            name: root
+    additionalMongodConfig:
+      storage.wiredTiger.engineConfig.journalCompressor: zlib
+    statefulSet:
+      volumeClaimTemplates:
+        - name: data-volume
+          storageClassName: "{{MONGODB_STORAGE_CLASS}}"
+          accessModes:
+            - ReadWriteOnce
+          storage: 10Gi
+        - name: logs-volume
+          storageClassName: "{{MONGODB_STORAGE_CLASS}}"
+          accessModes:
+            - ReadWriteOnce
+          storage: 2Gi
+
+tapdata-server:
+  replicaCount: {{SERVER_REPLICA_COUNT}}
+  image:
+    repository: {{SERVER_IMAGE_REPOSITORY}}
+    tag: {{IMAGE_TAG}}
+    kubectlRepository: {{KUBECTL_IMAGE_REPOSITORY}}
+    kubectlTag: latest
+    pullPolicy: IfNotPresent
+  service:
+    name: tapdata-server-svr
+    type: "{{SERVER_SERVICE_TYPE}}"
+    port: 3030
+    targetPort: 3030
+    {{SERVER_NODEPORT_CONFIG}}
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+    requests:
+      cpu: 500m
+      memory: 2Gi
+  env:
+    module: frontend
+    frontendWorkerCount: 1
+    backendUrl: "http://tapdata-server-svr:3030/api/"
+    javaVersion: java17
+    tz: "{{TZ}}"
+    licenseHost: "{{LICENSE_HOST}}"
+
+tapdata-engine:
+  replicaCount: {{ENGINE_REPLICA_COUNT}}
+  image:
+    repository: {{ENGINE_IMAGE_REPOSITORY}}
+    tag: {{IMAGE_TAG}}
+    pullPolicy: IfNotPresent
+  resources:
+    limits:
+      cpu: 2000m
+      memory: 4Gi
+    requests:
+      cpu: 500m
+      memory: 2Gi
+  env:
+    module: backend
+    backendUrl: "http://tapdata-server-svr:3030/api/"
+    javaVersion: java17
+    tz: "{{TZ}}"
+    licenseHost: "{{LICENSE_HOST}}"
+
+tapdata-apiserver:
+  enabled: {{APISERVER_ENABLED}}
+  replicaCount: {{APISERVER_REPLICA_COUNT}}
+  image:
+    repository: {{APISERVER_IMAGE_REPOSITORY}}
+    tag: {{IMAGE_TAG}}
+    pullPolicy: IfNotPresent
+  service:
+    name: tapdata-api-svr
+    type: "{{APISERVER_SERVICE_TYPE}}"
+    port: 3080
+    targetPort: 3080
+    {{APISERVER_NODEPORT_CONFIG}}
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 2Gi
+    requests:
+      cpu: 250m
+      memory: 1Gi
+  env:
+    module: apiserver
+    backendUrl: "http://tapdata-server-svr:3030/api/"
+    javaVersion: java17
+    tz: "{{TZ}}"
+    licenseHost: "{{LICENSE_HOST}}"

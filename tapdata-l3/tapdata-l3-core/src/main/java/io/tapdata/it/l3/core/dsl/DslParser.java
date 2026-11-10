@@ -58,7 +58,7 @@ public class DslParser {
     // ==================== Public API ====================
 
     public ScenarioConfig parse(Path yamlFile) {
-        log.info("[DSL] Parsing {}", yamlFile);
+        log.debug("[DSL] Parsing {}", yamlFile);
         try (InputStream is = Files.newInputStream(yamlFile)) {
             @SuppressWarnings("unchecked")
             Map<String, Object> root = yaml.load(is);
@@ -188,7 +188,7 @@ public class DslParser {
             result.put(key, val);
         }
         if (!result.isEmpty()) {
-            log.info("[DSL] Scenario '{}': parsed {} env variable(s) — will be injected into System Properties + SpEL context",
+            log.debug("[DSL] Scenario '{}': parsed {} env variable(s) — will be injected into System Properties + SpEL context",
                     caseId, result.size());
         }
         return result;

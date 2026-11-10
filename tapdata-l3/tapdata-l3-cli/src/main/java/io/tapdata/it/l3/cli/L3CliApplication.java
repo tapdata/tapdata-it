@@ -6,7 +6,12 @@ import io.tapdata.it.l3.common.StepConfig;
 import io.tapdata.it.l3.core.L3CoreApplication;
 import io.tapdata.it.l3.core.dsl.DslParser;
 import io.tapdata.it.l3.core.plugin.PluginCenter;
+import io.tapdata.it.l3.core.console.ConsoleUI;
 import io.tapdata.it.l3.core.plugin.PluginCenter.PluginLoadException;
+import io.tapdata.it.l3.core.report.JsonReportGenerator;
+import io.tapdata.it.l3.core.report.JUnitXmlReportGenerator;
+import io.tapdata.it.l3.core.report.HtmlReportGenerator;
+import io.tapdata.it.l3.core.report.ReportWriter;
 import io.tapdata.it.l3.core.result.ScenarioResult;
 import io.tapdata.it.l3.core.runner.ScenarioRunner;
 import io.tapdata.it.l3.plugin.ActionHandler;
@@ -20,7 +25,6 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.stream.Collectors;
 
 /**
  * TapData L3 CLI — Picocli command-line wrapper around the Spring Boot core.
@@ -134,30 +138,37 @@ public class L3CliApplication implements Runnable {
             }
 
             if (scenarios.isEmpty()) {
-                System.out.println("[L3] No scenarios to run after filtering.");
+                ConsoleUI.warn("no scenarios to run after filtering");
                 return 0;
             }
 
-            System.out.printf("[L3] Will execute %d scenario(s): %s%n",
-                    scenarios.size(),
-                    scenarios.stream().map(s -> s.getCaseId() + " (" + s.getScenario() + ")")
-                            .collect(Collectors.joining(", ")));
+            ConsoleUI.banner(scenarios);
 
             List<ScenarioResult> results = new ArrayList<>();
-            int passed = 0, failed = 0;
+            int scenarioIndex = 0;
             for (ScenarioConfig scenario : scenarios) {
+                ConsoleUI.scenarioStart(++scenarioIndex, scenarios.size(), scenario);
                 ScenarioResult result = runner.execute(scenario);
+                ConsoleUI.scenarioEnd(result);
                 results.add(result);
-                if (result.isSuccess()) passed++; else failed++;
             }
 
-            System.out.println();
-            System.out.println("================================================");
-            System.out.printf("[L3] Execution Summary: %d passed, %d failed, %d total%n",
-                    passed, failed, scenarios.size());
-            System.out.println("================================================");
+            // ---- 三格式测试报告（JSON / JUnit XML / HTML）----
+            Path reportDir = outputDir != null && !outputDir.isBlank()
+                    ? Paths.get(outputDir)
+                    : Paths.get("reports");
+            List<Path> reportFiles = new ArrayList<>();
+            try {
+                ReportWriter.writeAll(results, reportDir);
+                reportFiles.add(reportDir.resolve(JsonReportGenerator.FILE_NAME));
+                reportFiles.add(reportDir.resolve(JUnitXmlReportGenerator.FILE_NAME));
+                reportFiles.add(reportDir.resolve(HtmlReportGenerator.FILE_NAME));
+            } catch (Exception reportError) {
+                ConsoleUI.warn("report generation failed: " + reportError.getMessage());
+            }
 
-            return failed == 0 ? 0 : 1;
+            ConsoleUI.summary(results, reportFiles);
+            return results.stream().allMatch(ScenarioResult::isSuccess) ? 0 : 1;
         } catch (Exception e) {
             System.err.println("[L3] Fatal error: " + e.getMessage());
             return 2;

@@ -1,0 +1,232 @@
+case_id: "L3-DEPLOY-TAPDATA-HA"
+scenario: "TapData K8s HA — 2 TM + 2 Engine + 2 ApiServer"
+group: "functional"
+description: >-
+  Verify TapData deploy on K8s matches expectations:
+  (1) 2 TM / 2 Engine / 2 ApiServer replicas all ready;
+  (2) Engine & ApiServer reach TM via K8s service local domain
+      (tapdata-server-svr.<ns>.svc.cluster.local);
+  (3) stop a specified TM pod / a specified Engine pod, and the Deployment self-heals.
+
+steps:
+  # ============================================================
+  # 0. 向 License Server 申请 License
+  # ============================================================
+  - id: "fetch_license"
+    action: "get_license"
+    inputs:
+      base_url: "http://192.168.1.184:18080"
+      username: "license-temp"
+      password: "Gotapd8!"
+      customer: "tapdata-it"
+      reason: "L3 HA e2e test"
+      valid_days: 30
+      version: "4.23.0"
+      license_type: "OP"
+      engine_limit: 3
+    outputs: [license]
+    timeout_seconds: 60
+
+  # ============================================================
+  # 1. 部署：2 TM + 2 Engine + 2 ApiServer
+  # ============================================================
+  - id: "deploy_ha"
+    action: "deploy_tapdata"
+    inputs:
+      host: "localhost"
+      prebuilt_image: "192.168.1.184:5001/tapdata/tapdata-enterprise:latest"
+      harbor_registry: "192.168.1.184:5001"
+      mongodb_uri: "mongodb://root:AbcDef123@mongo60-rs-headless.tapdata-db.svc.cluster.local:27017/tapdata?replicaSet=rs0&authSource=admin"
+      mongodb_hosts: "mongo60-rs-0.mongo60-rs-headless.tapdata-db.svc.cluster.local:27017,mongo60-rs-1.mongo60-rs-headless.tapdata-db.svc.cluster.local:27017,mongo60-rs-2.mongo60-rs-headless.tapdata-db.svc.cluster.local:27017"
+      mongodb_user: "root"
+      mongodb_password: "AbcDef123"
+      namespace: "tapdata-ha"
+      server_replicas: 2
+      engine_replicas: 2
+      apiserver_replicas: 2
+      # Engine / ApiServer 通过 K8s svc 全域名访问 TM
+      backend_url: "http://tapdata-server-svr.tapdata-ha.svc.cluster.local:3030/api/"
+      license_host: "192.168.1.184:18080"
+      license: "#{ #steps['fetch_license'].outputs['license'] }"
+    outputs: [namespace, helmRelease]
+    timeout_seconds: 900
+
+  # ============================================================
+  # 2. 断言：三个组件各 2 副本 Ready
+  # ============================================================
+  - id: "tm_replicas_2"
+    action: "kubectl"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-ha"
+      command: "get deploy tapdata-tapdata-server -o jsonpath='{.status.readyReplicas}'"
+      expect_stdout_equals: "2"
+      max_attempts: 60
+      poll_interval_seconds: 5
+    timeout_seconds: 400
+
+  - id: "engine_replicas_2"
+    action: "kubectl"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-ha"
+      command: "get deploy tapdata-tapdata-engine -o jsonpath='{.status.readyReplicas}'"
+      expect_stdout_equals: "2"
+      max_attempts: 60
+      poll_interval_seconds: 5
+    timeout_seconds: 400
+
+  - id: "apiserver_replicas_2"
+    action: "kubectl"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-ha"
+      command: "get deploy tapdata-tapdata-apiserver -o jsonpath='{.status.readyReplicas}'"
+      expect_stdout_equals: "2"
+      max_attempts: 60
+      poll_interval_seconds: 5
+    timeout_seconds: 400
+
+  # ============================================================
+  # 3. 断言：Engine / ApiServer 通过 svc local domain 访问 TM
+  # ============================================================
+  - id: "engine_dns_tm"
+    action: "exec"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-ha"
+      pod: "tapdata-tapdata-engine"
+      command: "getent hosts tapdata-server-svr.tapdata-ha.svc.cluster.local"
+      expect_stdout_contains: "tapdata-server-svr.tapdata-ha.svc.cluster.local"
+    timeout_seconds: 60
+
+  - id: "engine_backend_url"
+    action: "exec"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-ha"
+      pod: "tapdata-tapdata-engine"
+      command: "printenv BACKENDURL"
+      expect_stdout_contains: "tapdata-server-svr.tapdata-ha.svc.cluster.local:3030/api/"
+    timeout_seconds: 60
+
+  - id: "apiserver_dns_tm"
+    action: "exec"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-ha"
+      pod: "tapdata-tapdata-apiserver"
+      command: "getent hosts tapdata-server-svr.tapdata-ha.svc.cluster.local"
+      expect_stdout_contains: "tapdata-server-svr.tapdata-ha.svc.cluster.local"
+    timeout_seconds: 60
+
+  - id: "apiserver_backend_url"
+    action: "exec"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-ha"
+      pod: "tapdata-tapdata-apiserver"
+      command: "printenv BACKENDURL"
+      expect_stdout_contains: "tapdata-server-svr.tapdata-ha.svc.cluster.local:3030/api/"
+    timeout_seconds: 60
+
+  # Engine 通过 svc 全域名实际连通 TM（HTTP 非 000 即证明 TCP+HTTP 可达）
+  - id: "engine_http_tm"
+    action: "exec"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-ha"
+      pod: "tapdata-tapdata-engine"
+      command: >-
+        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5
+        http://tapdata-server-svr.tapdata-ha.svc.cluster.local:3030/);
+        echo "http_code=$code"; test -n "$code" && test "$code" != "000"
+    timeout_seconds: 60
+
+  # ============================================================
+  # 3.5 License 校验：两个 TM Pod 均未发生过容器重启
+  #     （License 过期/无效会导致 TM 进程退出并被 livenessProbe 反复重启）
+  # ============================================================
+  - id: "tm_license_ok"
+    action: "kubectl"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-ha"
+      command: "get pods -l app.kubernetes.io/name=tapdata-server -o jsonpath='{.items[*].status.containerStatuses[*].restartCount}'"
+      expect_stdout_equals: "0 0"
+    timeout_seconds: 60
+
+  # ============================================================
+  # 4. 停止指定 TM Pod → Deployment 自愈到 2 副本
+  # ============================================================
+  - id: "get_tm_pod"
+    action: "kubectl"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-ha"
+      command: "get pods -l app.kubernetes.io/name=tapdata-server --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}'"
+      expect_stdout_contains: "tapdata-tapdata-server"
+    timeout_seconds: 60
+
+  - id: "stop_tm_pod"
+    action: "kubectl"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-ha"
+      command: "delete pod #{ #steps['get_tm_pod'].outputs['stdoutTrimmed'] }"
+      command_timeout_seconds: 120
+    timeout_seconds: 180
+
+  - id: "tm_self_heal"
+    action: "kubectl"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-ha"
+      command: "get pods -l app.kubernetes.io/name=tapdata-server -o jsonpath='{.items[*].metadata.name}'"
+      expect_stdout_not_contains: "#{ #steps['get_tm_pod'].outputs['stdoutTrimmed'] }"
+      max_attempts: 60
+      poll_interval_seconds: 5
+    timeout_seconds: 400
+
+  # ============================================================
+  # 5. 停止指定 Engine Pod → Deployment 自愈到 2 副本
+  # ============================================================
+  - id: "get_engine_pod"
+    action: "kubectl"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-ha"
+      command: "get pods -l app.kubernetes.io/name=tapdata-engine --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}'"
+      expect_stdout_contains: "tapdata-tapdata-engine"
+    timeout_seconds: 60
+
+  - id: "stop_engine_pod"
+    action: "kubectl"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-ha"
+      command: "delete pod #{ #steps['get_engine_pod'].outputs['stdoutTrimmed'] }"
+      command_timeout_seconds: 120
+    timeout_seconds: 180
+
+  - id: "engine_self_heal"
+    action: "kubectl"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-ha"
+      command: "get pods -l app.kubernetes.io/name=tapdata-engine -o jsonpath='{.items[*].metadata.name}'"
+      expect_stdout_not_contains: "#{ #steps['get_engine_pod'].outputs['stdoutTrimmed'] }"
+      max_attempts: 60
+      poll_interval_seconds: 5
+    timeout_seconds: 400
+
+  # ============================================================
+  # 6. 收尾：卸载
+  # ============================================================
+  - id: "cleanup"
+    action: "undeploy_tapdata"
+    inputs:
+      namespace: "tapdata-ha"
+      helm_release: "tapdata"
+      host: "localhost"
+    timeout_seconds: 300

@@ -1,0 +1,17 @@
+# AWS EKS Ingress Configuration (ALB Ingress Controller)
+# This file is merged with values.yaml during helm install
+# Usage: helm install -f values.yaml -f values-ingress-aws.yaml ...
+
+ingress:
+  enabled: true
+  name: ""
+  className: alb
+  pathType: Prefix
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/certificate-arn: ""
+  host: ""
+  tls: []

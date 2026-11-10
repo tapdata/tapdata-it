@@ -1,0 +1,6 @@
+apiVersion: v2
+name: mongodb
+description: A subchart for deploying MongoDB replica set using MongoDB Community Operator
+type: application
+version: 1.0.0
+appVersion: "6.0.5"
