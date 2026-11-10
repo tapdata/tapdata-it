@@ -558,6 +558,11 @@ public class MavenPluginResolver {
                 .filter(seen::add)  // 按 Set 去重
                 .toList();
 
+        // Validate the entire batch before starting downloads, preserving the input error.
+        for (String coordinate : uniqueCoords) {
+            parseCoordinate(coordinate);
+        }
+
         log.info("[MavenPluginResolver] Resolving {} direct artifact(s) with {} threads...",
                 uniqueCoords.size(), downloadConcurrency);
 
