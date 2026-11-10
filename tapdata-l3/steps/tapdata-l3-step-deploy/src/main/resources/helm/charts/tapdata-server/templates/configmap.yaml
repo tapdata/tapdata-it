@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "tapdata-server.fullname" . }}-config
+  labels:
+    {{- include "tapdata-server.labels" . | nindent 4 }}
+data:
+  license.txt: |
+    {{ .Values.env.license }}
+  application.yml: |
+    spring:
+        data:
+            mongodb:
+                uri: ""
+                ssl: 'false'
+                sslCA: ""
+                sslCertKey: ""
+                conn_params: ""
+                username: "{{ .Values.global.mongodb.user }}"
+                password: ""
+                mongoConnectionString: '{{ .Values.global.mongodb.hosts }}/{{ .Values.global.mongodb.database }}?authSource={{ .Values.global.mongodb.authSource }}'
+                sslPEMKeyFilePassword: U2FsdGVkX1+mndt/qnglPQ==
+                authenticationDatabase: admin
+    tapdata:
+        metrics:
+            enable: true
+            enginePort: 3035
+            agentPort: 3036
+        cloud:
+            accessCode: '<ACCESS_CODE>'
+            retryTime: 3
+            baseURLs: '{{ .Values.env.backendUrl }}'
+        mode: cluster
+        conf:
+            tapdataPort: '3030'
+            backendUrl: '{{ .Values.env.backendUrl }}'
+            apiServerPort: '3080'
+            tapdataJavaOpts: '-Xmx8G -Xms4G'
+            SCRIPT_DIR: etc
+            reportInterval: 5000
+            apiWorkerMaxMemory: 512
+            uuid: 568c765b-9bc0-4950-ba24-46fd48884980
+            Decimal128ToNumber: 'false'
+            tapdataTMJavaOpts: '-Xmx8G -Xms4G'
+            responseOfTotalType: NUMBER

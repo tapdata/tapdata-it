@@ -1,0 +1,44 @@
+global:
+  mongodb:
+    replicaSetName: tapdata-mongodb
+    protocol: mongodb
+    user: root
+    password: AbcDef123
+    authSource: admin
+    database: tapdata
+    hosts: "tapdata-mongodb-0.tapdata-mongodb-svc:27017,tapdata-mongodb-1.tapdata-mongodb-svc:27017,tapdata-mongodb-2.tapdata-mongodb-svc:27017"
+
+nameOverride: ""
+fullnameOverride: ""
+
+replicaSet:
+  name: tapdata-mongodb
+  members: 3
+  version: "6.0.5"
+  security:
+    authentication:
+      modes:
+        - SCRAM
+  users:
+    - db: admin
+      name: root
+      passwordSecretRef:
+        name: mongodb-admin-password
+      scramCredentialsSecretName: scram
+      roles:
+        - db: admin
+          name: root
+  additionalMongodConfig:
+    storage.wiredTiger.engineConfig.journalCompressor: zlib
+  statefulSet:
+    volumeClaimTemplates:
+      - name: data-volume
+        storageClassName: ""
+        accessModes:
+          - ReadWriteOnce
+        storage: 10Gi
+      - name: logs-volume
+        storageClassName: ""
+        accessModes:
+          - ReadWriteOnce
+        storage: 2Gi

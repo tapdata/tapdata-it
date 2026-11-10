@@ -1,0 +1,6 @@
+apiVersion: v2
+name: tapdata-engine
+description: A subchart for deploying TapData Engine (backend module)
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
