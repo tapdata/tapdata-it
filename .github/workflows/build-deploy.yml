@@ -62,8 +62,16 @@ jobs:
       # 后续添加单元测试后自动生效
       - name: Compile and run unit tests
         shell: bash
+        env:
+          PR_FROM_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
-          mvn -B test -DskipTests=false
+          if [[ "$PR_FROM_FORK" == 'true' ]]; then
+            # Fork PRs have no MAVEN_SETTINGS secret. Test the resolver and its
+            # dependencies using public artifacts; main still checks the full reactor.
+            mvn -B -pl tapdata-l3/tapdata-l3-core -am test -DskipTests=false
+          else
+            mvn -B test -DskipTests=false
+          fi
 
       # 部署 SNAPSHOT 到 Nexus（版本为 1.0-SNAPSHOT，每次覆盖）；仅在 settings.xml
       # 配置了 nexus-tapdata-net server 认证且托管 runner 可达时生效
