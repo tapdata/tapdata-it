@@ -53,6 +53,26 @@ steps:
     timeout_seconds: 1500
 
   # ============================================================
+  # 1.5 License 快速失败检查
+  #     TM 启动后若 License 无效/过期，Spring 会主动 graceful shutdown，
+  #     manager 日志文件（/tapdata/apps/logs/manager/*.log）会出现
+  #     "License is expired"，随后 3030 端口关闭、Pod 无法 Ready。
+  #     此步骤在部署后立即 exec 到 TM Pod 读取 manager 日志，
+  #     命中即 fail，避免后续断言无意义等待。
+  # ============================================================
+  - id: "tm_license_not_expired"
+    action: "kubectl"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-ha"
+      # kubectl exec 不支持 -l/--selector（v1.35+），用子命令取首个 TM server pod 名
+      command: "exec $(kubectl -n tapdata-ha get pods -l app.kubernetes.io/name=tapdata-server -o jsonpath='{.items[0].metadata.name}') -- sh -c 'grep -h \"License is expired\" /tapdata/apps/logs/manager/*.log 2>/dev/null; true'"
+      expect_stdout_not_contains: "License is expired"
+      max_attempts: 12
+      poll_interval_seconds: 5
+    timeout_seconds: 90
+
+  # ============================================================
   # 2. 断言：三个组件各 2 副本 Ready
   # ============================================================
   - id: "tm_replicas_2"

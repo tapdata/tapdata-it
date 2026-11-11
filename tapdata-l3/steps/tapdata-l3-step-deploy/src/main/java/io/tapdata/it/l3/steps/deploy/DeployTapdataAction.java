@@ -168,7 +168,19 @@ public class DeployTapdataAction extends BaseStep {
                 "helm upgrade --install %s %s -n %s --create-namespace " +
                         "--wait --timeout 900s -f %s",
                 helmRelease, REMOTE_CHART, namespace, REMOTE_VALUES);
-        k8s.exec(helmInstall, 950_000L).assertSuccess("helm upgrade --install " + helmRelease);
+        try {
+            k8s.exec(helmInstall, 950_000L).assertSuccess("helm upgrade --install " + helmRelease);
+        } catch (Exception helmErr) {
+            // helm --wait 失败常见原因：Pod 未 Ready。快速排查是否 License 过期导致 TM 主动 shutdown，
+            // 给出明确错误，避免用户在 "connection refused" / "pod not ready" 上绕圈。
+            String licenseHint = detectLicenseExpiry(k8s, namespace);
+            if (licenseHint != null) {
+                throw new RuntimeException("helm upgrade failed: " + helmErr.getMessage()
+                        + " — " + licenseHint, helmErr);
+            }
+            dumpDeployDiagnostics(k8s, namespace);
+            throw helmErr;
+        }
 
         // ---- 10. 就绪断言：kubectl wait Ready + Running Pod 计数 ----
         // helm --wait 在 release 已存在且无变化时直接返回，不能作为就绪依据 —— 必须独立断言。
@@ -183,7 +195,12 @@ public class DeployTapdataAction extends BaseStep {
         try {
             assertPodsReady(k8s, namespace, minReadyPods);
         } catch (Exception e) {
+            // 就绪断言失败时同样排查 License 过期，给出明确原因
+            String licenseHint = detectLicenseExpiry(k8s, namespace);
             dumpDeployDiagnostics(k8s, namespace);
+            if (licenseHint != null) {
+                throw new RuntimeException(e.getMessage() + " — " + licenseHint, e);
+            }
             throw e;
         }
 
@@ -252,6 +269,42 @@ public class DeployTapdataAction extends BaseStep {
                 log.warn("[deploy_tapdata] diag `{}` failed: {}", cmd, e.getMessage());
             }
         }
+    }
+
+    /**
+     * 快速排查 TM 是否因 License 过期而主动 shutdown。
+     * <p>
+     * TM 启动时若 License 无效/过期，Spring 会 graceful shutdown 并关闭 3030 端口，
+     * 导致 Pod 永远不 Ready、helm --wait 超时。此方法 exec 到 TM Pod 读取 manager 日志，
+     * 若发现 "License is expired" 返回可读的错误提示，否则返回 null。
+     *
+     * @return License 过期提示文案，或 null（未发现 / 无法判断）
+     */
+    private String detectLicenseExpiry(K8sClient k8s, String namespace) {
+        try {
+            // kubectl exec 不支持 -l/--selector（v1.35+ 移除），先取首个 TM server pod 名再 exec。
+            // 所有 TM 副本共享同一 license，任一命中即可判定过期。
+            K8sClient.ExecResult podName = k8s.exec(
+                    "kubectl -n " + namespace + " get pods " +
+                            "-l app.kubernetes.io/name=tapdata-server " +
+                            "-o jsonpath='{.items[0].metadata.name}'");
+            String pod = podName.getStdoutTrimmed();
+            if (pod == null || pod.isEmpty()) {
+                return null;
+            }
+            K8sClient.ExecResult r = k8s.exec(
+                    "kubectl -n " + namespace + " exec " + pod + " -- " +
+                            "sh -c 'grep -h \"License is expired\" /tapdata/apps/logs/manager/*.log 2>/dev/null; true'",
+                    30_000L);
+            if (r.isSuccess() && r.getStdoutTrimmed().contains("License is expired")) {
+                return "TM License 已过期/无效 —— TM 进程主动 shutdown，3030 端口未监听，" +
+                        "Pod 无法 Ready。请检查 License Server 签发的 license 是否被 TM 正确识别" +
+                        "（license 内容、版本匹配、时钟同步）。";
+            }
+        } catch (Exception e) {
+            log.debug("[deploy_tapdata] detectLicenseExpiry skipped: {}", e.getMessage());
+        }
+        return null;
     }
 
     // ========================================================================
