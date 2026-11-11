@@ -21,7 +21,7 @@ steps:
       customer: "tapdata-it"
       reason: "L3 HA e2e test"
       valid_days: 30
-      version: "4.23.0"
+      version: "4.25.0"
       license_type: "OP"
       engine_limit: 3
     outputs: [license]
@@ -36,10 +36,14 @@ steps:
       host: "localhost"
       prebuilt_image: "192.168.1.184:5001/tapdata/tapdata-enterprise:latest"
       harbor_registry: "192.168.1.184:5001"
-      mongodb_uri: "mongodb://root:AbcDef123@mongo60-rs-headless.tapdata-db.svc.cluster.local:27017/tapdata?replicaSet=rs0&authSource=admin"
+      # 专用 database：避免共享 tapdata 库中历史 Worker 导致试用 License 被 14 天规则判过期
+      mongodb_uri: "mongodb://root:AbcDef123@mongo60-rs-headless.tapdata-db.svc.cluster.local:27017/tapdata_l3_ha?replicaSet=rs0&authSource=admin"
       mongodb_hosts: "mongo60-rs-0.mongo60-rs-headless.tapdata-db.svc.cluster.local:27017,mongo60-rs-1.mongo60-rs-headless.tapdata-db.svc.cluster.local:27017,mongo60-rs-2.mongo60-rs-headless.tapdata-db.svc.cluster.local:27017"
       mongodb_user: "root"
       mongodb_password: "AbcDef123"
+      # 必须显式指定：chart 用 hosts + database 拼接连接串，忽略 mongodb_uri 里的库名；
+      # 默认值 tapdata 是共享库（含 2026-08 的历史 Worker），会触发试用 License 14 天封顶判过期。
+      mongodb_database: "tapdata_l3_ha"
       namespace: "tapdata-ha"
       server_replicas: 2
       engine_replicas: 2

@@ -80,6 +80,10 @@ spec:
               value: "{{ .Values.env.licenseHost }}"
             - name: TAPDATA_WORK_DIR
               value: "/tapdata/apps"
+            # ApiServer 按 CPU 数拉起 worker（实测 40 个），默认 2Gi 内存会被 OOMKilled（exit 137）。
+            # 固定 8 个 worker 控制内存占用。
+            - name: API_WORKER_COUNT
+              value: "8"
           # 启动探针 —— ApiServer 同样依赖 TM 可达 + Java 冷启动，慢启动不应被 liveness 误杀。
           {{- if .Values.startupProbe.enabled }}
           startupProbe:
@@ -100,8 +104,13 @@ spec:
               mountPath: /tmp/conf
             - name: logs
               mountPath: /tapdata/apps/logs
+          # 镜像内 application.yml 的 accessCode 是占位符 <ACCESS_CODE>，ApiServer 用它登录 TM 会
+          # 一直 NotLogin → 3080 不监听 → Pod 永不 Ready。启动前就地替换成 TM 初始化 admin 用户的
+          # accessCode（就地 sed 而不是挂载覆盖，保证 entrypoint 里注入 mongo 连接串的 sed -i 仍可用）。
           command:
-            - /tapdata/docker-entrypoint.sh
+            - /bin/bash
+            - -c
+            - sed -i -E "s#^( *accessCode:).*#\1 '3324cfdf-7d3e-4792-bd32-571638d4562f'#" /tapdata/apps/application.yml && exec /tapdata/docker-entrypoint.sh
       volumes:
         - name: config
           configMap:

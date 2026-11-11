@@ -117,6 +117,12 @@ public class TmExecuteInspectAction extends BaseStep {
 
         log.info("[TM] Inspect {} final: status={}, result={}, errorMsg={}", inspectId, finalStatus, result, errorMsg);
 
+        if (!isTerminalStatus(finalStatus)) {
+            // 未到终态就超时 —— 绝不能当作"校验通过"，否则会产生假通过。
+            throw new IllegalStateException("Inspect " + inspectId
+                    + " did not reach a terminal state within " + waitTimeout + "s, status=" + finalStatus);
+        }
+
         if ("error".equalsIgnoreCase(finalStatus)) {
             // Debug dump — 帮助排查
             log.error("[TM] === INSPECT FAILED DEBUG DUMP ===");

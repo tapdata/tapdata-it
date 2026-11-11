@@ -122,12 +122,22 @@ public class DbforgeClient {
         body.put("db_type", dbType);
         if (mode != null) body.put("mode", mode);
         if (topology != null) body.put("topology", topology);
+        // dbforge 默认租约 TTL 只有 10 分钟（DBFORGE_DEFAULT_TTL=10m），L3 用例常跑 10~15 分钟，
+        // 中途租约过期会导致库被回收、TM 报 "No route to host"。默认申请 45 分钟（服务端上限 60m）。
+        int ttlMinutes = intEnv("DBFORGE_LEASE_TTL_MINUTES", 45);
+        if (ttlMinutes > 0) body.put("ttl_minutes", ttlMinutes);
 
         JsonNode resp = post("/v1/leases", body);
         LeaseResult lease = LeaseResult.fromJson(resp);
 
-        // Always keep the original internal host — TM agents inside K8s need this
-        lease.internalHost = lease.host;
+        // 优先使用 dbforge 返回的集群内 Service DNS（如 lease-xxx-np.dbforge-env-ephemeral.svc.cluster.local），
+        // TM / Engine 在集群内直连它，避免走 NodePort 时出现 "No route to host"。
+        if (lease.internalHost == null || lease.internalHost.isBlank()) {
+            lease.internalHost = lease.host;
+            lease.internalPort = lease.port;
+        }
+        log.info("[DBForge] Lease ready: id={}, external={}:{}, internal={}:{}, ttl={}min",
+                lease.leaseId, lease.host, lease.port, lease.internalHost, lease.internalPort, ttlMinutes);
 
         // Rewrite internal host → public host for external connectivity (L3 runner)
         if (lease.host != null && !lease.host.equals(publicHost)) {
@@ -139,6 +149,19 @@ public class DbforgeClient {
         }
 
         return lease;
+    }
+
+    private static int intEnv(String name, int defaultValue) {
+        String v = System.getenv(name);
+        if (v == null || v.isBlank()) {
+            v = System.getProperty(name);
+        }
+        if (v == null || v.isBlank()) return defaultValue;
+        try {
+            return Integer.parseInt(v.trim());
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
     }
 
     /** Destroy a lease — releases the database. */
@@ -191,8 +214,9 @@ public class DbforgeClient {
         public String mode;
         public String topology;
         public String host;          // Public host (for external clients like L3 runner)
-        public String internalHost;  // Original internal host (for TM agents inside K8s)
+        public String internalHost;  // In-cluster host (Service DNS) for TM agents inside K8s
         public int port;
+        public int internalPort;
         public String database;
         public String username;
         public String password;
@@ -209,6 +233,7 @@ public class DbforgeClient {
             m.put("host", host);
             m.put("internal_host", internalHost);
             m.put("port", port);
+            m.put("internal_port", internalPort);
             m.put("database", database);
             m.put("username", username);
             m.put("password", password);
@@ -232,6 +257,15 @@ public class DbforgeClient {
                 r.uri = text(conn, "uri");
                 r.jdbcUrl = text(conn, "jdbc_url");
                 if (r.jdbcUrl == null) r.jdbcUrl = text(conn, "jdbcUrl");
+                JsonNode endpoints = conn.get("endpoints");
+                if (endpoints != null) {
+                    String ih = text(endpoints, "internal_host");
+                    if (ih != null && !ih.isBlank()) {
+                        r.internalHost = ih;
+                        r.internalPort = endpoints.has("internal_port")
+                                ? endpoints.get("internal_port").asInt(r.port) : r.port;
+                    }
+                }
             }
             return r;
         }

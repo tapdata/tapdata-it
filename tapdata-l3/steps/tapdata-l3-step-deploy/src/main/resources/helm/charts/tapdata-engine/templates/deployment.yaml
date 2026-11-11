@@ -98,8 +98,12 @@ spec:
               mountPath: /tmp/conf
             - name: logs
               mountPath: /tapdata/apps/logs
+          # 镜像内 application.yml 的 accessCode 是占位符 <ACCESS_CODE>，Engine 用它会登录 TM 失败
+          # （无法注册、跑不了任务）。启动前就地替换成 TM 初始化 admin 用户的 accessCode。
           command:
-            - /tapdata/docker-entrypoint.sh
+            - /bin/bash
+            - -c
+            - sed -i -E "s#^( *accessCode:).*#\1 '3324cfdf-7d3e-4792-bd32-571638d4562f'#" /tapdata/apps/application.yml && exec /tapdata/docker-entrypoint.sh
       volumes:
         - name: config
           configMap:
