@@ -1,9 +1,14 @@
 package io.tapdata.it.l3.core.dsl;
 
+import io.tapdata.it.l3.common.ForBlock;
+import io.tapdata.it.l3.common.IfBlock;
 import io.tapdata.it.l3.common.ParallelBlock;
+import io.tapdata.it.l3.common.ScenarioBlocks;
 import io.tapdata.it.l3.common.ScenarioConfig;
 import io.tapdata.it.l3.common.ScenarioContext;
 import io.tapdata.it.l3.common.StepConfig;
+import io.tapdata.it.l3.common.SwitchBlock;
+import io.tapdata.it.l3.common.WhileBlock;
 import io.tapdata.it.l3.common.SafeSpelEvaluator;
 import io.tapdata.it.l3.common.exception.DslParseException;
 import org.junit.jupiter.api.DisplayName;
@@ -667,6 +672,347 @@ class DslParserTest {
         List<ScenarioConfig> configs = parser.parseDirectorySafe(tempDir);
         assertNotNull(configs);
         assertTrue(configs.isEmpty());
+    }
+
+    // ==================== if / for / switch 解析 ====================
+
+    @Test
+    @DisplayName("if 块 — 解析 condition / then / else 及嵌套 step")
+    void parseIfBlock() throws IOException {
+        String yaml = """
+                case_id: L3-IF-01
+                variables:
+                  enable_cdc: true
+                steps:
+                  - if:
+                      condition: "#{ #variables['enable_cdc'] }"
+                      then:
+                        - id: start_cdc
+                          action: echo
+                      else:
+                        - id: skip_cdc
+                          action: echo
+                """;
+
+        ScenarioConfig config = parseYaml(yaml);
+
+        assertEquals(1, config.getBlocks().size());
+        IfBlock block = assertInstanceOf(IfBlock.class, config.getBlocks().get(0));
+        assertEquals("#{ #variables['enable_cdc'] }", block.getCondition());
+        assertEquals(1, block.getThenBlocks().size());
+        assertEquals("start_cdc", ((StepConfig) block.getThenBlocks().get(0)).getId());
+        assertEquals(1, block.getElseBlocks().size());
+        assertEquals("skip_cdc", ((StepConfig) block.getElseBlocks().get(0)).getId());
+    }
+
+    @Test
+    @DisplayName("if 块 — else 可省略")
+    void parseIfBlockWithoutElse() throws IOException {
+        String yaml = """
+                case_id: L3-IF-02
+                steps:
+                  - if:
+                      condition: "true"
+                      then:
+                        - id: only_then
+                          action: echo
+                """;
+
+        IfBlock block = assertInstanceOf(IfBlock.class, parseYaml(yaml).getBlocks().get(0));
+        assertTrue(block.getElseBlocks().isEmpty());
+    }
+
+    @Test
+    @DisplayName("for 块 — 解析 var / index_var / items / steps")
+    void parseForBlock() throws IOException {
+        String yaml = """
+                case_id: L3-FOR-01
+                steps:
+                  - for:
+                      var: sink_idx
+                      index_var: i
+                      items: [1, 2, 3]
+                      steps:
+                        - id: "create_sink_${sink_idx}"
+                          action: echo
+                          inputs:
+                            suffix: "${sink_idx}"
+                """;
+
+        ForBlock block = assertInstanceOf(ForBlock.class, parseYaml(yaml).getBlocks().get(0));
+        assertEquals("sink_idx", block.getVar());
+        assertEquals("i", block.getIndexVar());
+        assertEquals(List.of(1, 2, 3), block.getItems());
+        assertEquals(1, block.getBlocks().size());
+        assertEquals("create_sink_${sink_idx}", ((StepConfig) block.getBlocks().get(0)).getId());
+    }
+
+    @Test
+    @DisplayName("for 块 — items 支持 SpEL 表达式")
+    void parseForBlockWithSpelItems() throws IOException {
+        String yaml = """
+                case_id: L3-FOR-02
+                variables:
+                  targets: [a, b]
+                steps:
+                  - for:
+                      var: target
+                      items: "#{ #variables['targets'] }"
+                      steps:
+                        - id: "step_${target}"
+                          action: echo
+                """;
+
+        ForBlock block = assertInstanceOf(ForBlock.class, parseYaml(yaml).getBlocks().get(0));
+        assertEquals("#{ #variables['targets'] }", block.getItems());
+        assertNull(block.getIndexVar());
+    }
+
+    @Test
+    @DisplayName("switch 块 — 解析 expression / cases / default")
+    void parseSwitchBlock() throws IOException {
+        String yaml = """
+                case_id: L3-SWITCH-01
+                variables:
+                  db_type: mysql
+                steps:
+                  - switch:
+                      expression: "#{ #variables['db_type'] }"
+                      cases:
+                        mysql:
+                          - id: mysql_step
+                            action: echo
+                        postgresql:
+                          - id: pg_step
+                            action: echo
+                      default:
+                        - id: unknown_step
+                          action: echo
+                """;
+
+        SwitchBlock block = assertInstanceOf(SwitchBlock.class, parseYaml(yaml).getBlocks().get(0));
+        assertEquals("#{ #variables['db_type'] }", block.getExpression());
+        assertEquals(2, block.getCases().size());
+        assertTrue(block.getCases().containsKey("mysql"));
+        assertTrue(block.getCases().containsKey("postgresql"));
+        assertEquals("mysql_step", ((StepConfig) block.getCases().get("mysql").get(0)).getId());
+        assertEquals(1, block.getDefaultBlocks().size());
+    }
+
+    @Test
+    @DisplayName("控制流块 — for 内嵌套 if，且 ScenarioBlocks 递归收集所有分支 step")
+    void parseNestedControlFlow() throws IOException {
+        String yaml = """
+                case_id: L3-NESTED-01
+                steps:
+                  - for:
+                      var: idx
+                      items: [1, 2, 3]
+                      steps:
+                        - if:
+                            condition: "#{ #variables['idx'] == 2 }"
+                            then:
+                              - id: "even_${idx}"
+                                action: echo
+                            else:
+                              - id: "odd_${idx}"
+                                action: echo
+                """;
+
+        ScenarioConfig config = parseYaml(yaml);
+        ForBlock forBlock = assertInstanceOf(ForBlock.class, config.getBlocks().get(0));
+        IfBlock ifBlock = assertInstanceOf(IfBlock.class, forBlock.getBlocks().get(0));
+
+        // 递归收集所有分支（校验/预加载用）
+        List<StepConfig> all = ScenarioBlocks.collectSteps(config.getBlocks());
+        assertEquals(2, all.size());
+        assertEquals(Set.of("even_${idx}", "odd_${idx}"),
+                new HashSet<>(all.stream().map(StepConfig::getId).toList()));
+
+        // 进度估算取所有分支的最大值：for 1 次迭代 × if 的 then/else 各 1 步 = 1
+        assertEquals(1, ScenarioBlocks.countSteps(config.getBlocks()));
+    }
+
+    @Test
+    @DisplayName("控制流块 — 嵌套块中的重复 step id 仍被拒绝")
+    void nestedDuplicateStepIdsRejected() {
+        String yaml = """
+                case_id: L3-DUP-NESTED
+                steps:
+                  - id: duplicate
+                    action: echo
+                  - if:
+                      condition: "true"
+                      then:
+                        - id: duplicate
+                          action: echo
+                """;
+
+        DslParseException ex = assertThrows(DslParseException.class, () -> parseYaml(yaml));
+        assertTrue(ex.getMessage().contains("duplicate"));
+    }
+
+    @Test
+    @DisplayName("if 块 — 缺少 condition 抛异常")
+    void ifBlockMissingCondition() {
+        String yaml = """
+                case_id: L3-IF-BAD
+                steps:
+                  - if:
+                      then:
+                        - id: s1
+                          action: echo
+                """;
+        assertThrows(DslParseException.class, () -> parseYaml(yaml));
+    }
+
+    @Test
+    @DisplayName("if 块 — 缺少 then 抛异常")
+    void ifBlockMissingThen() {
+        String yaml = """
+                case_id: L3-IF-BAD2
+                steps:
+                  - if:
+                      condition: "true"
+                """;
+        assertThrows(DslParseException.class, () -> parseYaml(yaml));
+    }
+
+    @Test
+    @DisplayName("for 块 — 缺少 var / items / steps 分别抛异常")
+    void forBlockMissingFields() {
+        String missingVar = """
+                case_id: L3-FOR-BAD
+                steps:
+                  - for:
+                      items: [1]
+                      steps:
+                        - id: s
+                          action: echo
+                """;
+        assertThrows(DslParseException.class, () -> parseYaml(missingVar));
+
+        String missingItems = """
+                case_id: L3-FOR-BAD2
+                steps:
+                  - for:
+                      var: x
+                      steps:
+                        - id: s
+                          action: echo
+                """;
+        assertThrows(DslParseException.class, () -> parseYaml(missingItems));
+
+        String missingSteps = """
+                case_id: L3-FOR-BAD3
+                steps:
+                  - for:
+                      var: x
+                      items: [1]
+                """;
+        assertThrows(DslParseException.class, () -> parseYaml(missingSteps));
+    }
+
+    @Test
+    @DisplayName("switch 块 — 缺少 expression / cases 分别抛异常")
+    void switchBlockMissingFields() {
+        String missingExpression = """
+                case_id: L3-SW-BAD
+                steps:
+                  - switch:
+                      cases:
+                        a:
+                          - id: s
+                            action: echo
+                """;
+        assertThrows(DslParseException.class, () -> parseYaml(missingExpression));
+
+        String missingCases = """
+                case_id: L3-SW-BAD2
+                steps:
+                  - switch:
+                      expression: "x"
+                """;
+        assertThrows(DslParseException.class, () -> parseYaml(missingCases));
+    }
+
+    // ==================== while 解析 ====================
+
+    @Test
+    @DisplayName("while 块 — 解析 condition / index_var / max_iterations / steps")
+    void parseWhileBlock() throws IOException {
+        String yaml = """
+                case_id: L3-WHILE-01
+                steps:
+                  - while:
+                      condition: "#{ #variables['retry'] < 3 }"
+                      index_var: i
+                      max_iterations: 10
+                      steps:
+                        - id: "poll_${i}"
+                          action: echo
+                          inputs:
+                            attempt: "${i}"
+                """;
+
+        WhileBlock block = assertInstanceOf(WhileBlock.class, parseYaml(yaml).getBlocks().get(0));
+        assertEquals("#{ #variables['retry'] < 3 }", block.getCondition());
+        assertEquals("i", block.getIndexVar());
+        assertEquals(10, block.getMaxIterations());
+        assertEquals(1, block.getBlocks().size());
+        assertEquals("poll_${i}", ((StepConfig) block.getBlocks().get(0)).getId());
+    }
+
+    @Test
+    @DisplayName("while 块 — index_var / max_iterations 可省略，max_iterations 使用默认值")
+    void parseWhileBlockDefaults() throws IOException {
+        String yaml = """
+                case_id: L3-WHILE-02
+                steps:
+                  - while:
+                      condition: "true"
+                      steps:
+                        - id: body
+                          action: echo
+                """;
+
+        WhileBlock block = assertInstanceOf(WhileBlock.class, parseYaml(yaml).getBlocks().get(0));
+        assertNull(block.getIndexVar());
+        assertEquals(WhileBlock.DEFAULT_MAX_ITERATIONS, block.getMaxIterations());
+    }
+
+    @Test
+    @DisplayName("while 块 — 缺少 condition / steps 或非法 max_iterations 抛异常")
+    void whileBlockInvalid() {
+        String missingCondition = """
+                case_id: L3-WHILE-BAD1
+                steps:
+                  - while:
+                      steps:
+                        - id: body
+                          action: echo
+                """;
+        assertThrows(DslParseException.class, () -> parseYaml(missingCondition));
+
+        String missingSteps = """
+                case_id: L3-WHILE-BAD2
+                steps:
+                  - while:
+                      condition: "true"
+                """;
+        assertThrows(DslParseException.class, () -> parseYaml(missingSteps));
+
+        String badMax = """
+                case_id: L3-WHILE-BAD3
+                steps:
+                  - while:
+                      condition: "true"
+                      max_iterations: 0
+                      steps:
+                        - id: body
+                          action: echo
+                """;
+        assertThrows(DslParseException.class, () -> parseYaml(badMax));
     }
 
     // ==================== Helper Methods ====================

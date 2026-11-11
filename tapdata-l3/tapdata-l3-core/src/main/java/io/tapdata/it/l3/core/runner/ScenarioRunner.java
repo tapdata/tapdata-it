@@ -1,10 +1,15 @@
 package io.tapdata.it.l3.core.runner;
 
+import io.tapdata.it.l3.common.ForBlock;
+import io.tapdata.it.l3.common.IfBlock;
 import io.tapdata.it.l3.common.ParallelBlock;
+import io.tapdata.it.l3.common.ScenarioBlocks;
 import io.tapdata.it.l3.common.ScenarioConfig;
 import io.tapdata.it.l3.common.ScenarioContext;
 import io.tapdata.it.l3.common.StepConfig;
 import io.tapdata.it.l3.common.SafeSpelEvaluator;
+import io.tapdata.it.l3.common.SwitchBlock;
+import io.tapdata.it.l3.common.WhileBlock;
 import io.tapdata.it.l3.common.SafeSpelEvaluator.SpelNullReferenceException;
 import io.tapdata.it.l3.common.exception.StepTimeoutException;
 import io.tapdata.it.l3.core.cleanup.CleanupManager;
@@ -22,11 +27,16 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Deque;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.*;
 import java.util.function.Consumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Drives scenario execution: iterates over parsed blocks (sequential steps + parallel blocks),
@@ -165,29 +175,8 @@ public class ScenarioRunner {
         long durationMs = 0;
 
         try {
-            int totalSteps = countSteps(scenario);
-            int stepIndex = 0;
-
-            for (Object block : scenario.getBlocks()) {
-                if (block instanceof StepConfig step) {
-                    stepIndex++;
-                    StepResult result = runWithProgress(step, stepIndex, totalSteps, ctx, usedHandlers);
-                    stepResults.add(result);
-                    if (result.isSuccess()) continue;
-                    failure = result;
-                    break;
-                } else if (block instanceof ParallelBlock parallel) {
-                    int startIndex = stepIndex + 1;
-                    stepIndex += parallel.getSteps().size();
-                    StepResult result = runParallelBlock(parallel, startIndex, totalSteps, ctx, usedHandlers, stepResults);
-                    if (result != null && !result.isSuccess()) {
-                        failure = result;
-                        break;
-                    }
-                } else {
-                    log.warn("[Scenario] Unknown block type: {}", block.getClass());
-                }
-            }
+            ExecutionTracker tracker = new ExecutionTracker(ScenarioBlocks.countSteps(scenario.getBlocks()));
+            failure = executeBlocks(scenario.getBlocks(), ctx, usedHandlers, stepResults, tracker);
         } catch (StepTimeoutException te) {
             log.error("[Scenario] Step '{}' timed out after {} seconds", te.getStepId(), te.getTimeoutSeconds(), te);
             durationMs = Duration.between(startTime, Instant.now()).toMillis();
@@ -323,27 +312,362 @@ public class ScenarioRunner {
         }
     }
 
-    // ==================== Utility ====================
+    // ==================== Block tree execution (if / for / switch) ====================
 
-    private int countSteps(ScenarioConfig scenario) {
-        int n = 0;
-        for (Object block : scenario.getBlocks()) {
-            if (block instanceof StepConfig) n++;
-            else if (block instanceof ParallelBlock p) n += p.getSteps().size();
+    /** Executes a list of blocks sequentially; returns the first failure or {@code null}. */
+    private StepResult executeBlocks(List<Object> blocks, ScenarioContext ctx,
+                                     List<ActionHandler> usedHandlers, List<StepResult> stepResults,
+                                     ExecutionTracker tracker) {
+        if (blocks == null) return null;
+        for (Object block : blocks) {
+            StepResult failure = executeBlock(block, ctx, usedHandlers, stepResults, tracker);
+            if (failure != null) return failure;
         }
-        return n;
+        return null;
+    }
+
+    private StepResult executeBlock(Object block, ScenarioContext ctx,
+                                    List<ActionHandler> usedHandlers, List<StepResult> stepResults,
+                                    ExecutionTracker tracker) {
+        if (block instanceof StepConfig step) {
+            tracker.index++;
+            StepResult result = runWithProgress(step, tracker.index, tracker.total, ctx, usedHandlers);
+            stepResults.add(result);
+            return result.isSuccess() ? null : result;
+        }
+        if (block instanceof ParallelBlock parallel) {
+            int startIndex = tracker.index + 1;
+            tracker.index += parallel.getSteps().size();
+            StepResult result = runParallelBlock(parallel, startIndex, tracker.total, ctx,
+                    usedHandlers, stepResults);
+            return result != null && !result.isSuccess() ? result : null;
+        }
+        if (block instanceof IfBlock ifBlock) {
+            return executeIfBlock(ifBlock, ctx, usedHandlers, stepResults, tracker);
+        }
+        if (block instanceof ForBlock forBlock) {
+            return executeForBlock(forBlock, ctx, usedHandlers, stepResults, tracker);
+        }
+        if (block instanceof WhileBlock whileBlock) {
+            return executeWhileBlock(whileBlock, ctx, usedHandlers, stepResults, tracker);
+        }
+        if (block instanceof SwitchBlock switchBlock) {
+            return executeSwitchBlock(switchBlock, ctx, usedHandlers, stepResults, tracker);
+        }
+        log.warn("[Scenario] Unknown block type: {}", block == null ? "null" : block.getClass());
+        return null;
+    }
+
+    private StepResult executeIfBlock(IfBlock block, ScenarioContext ctx,
+                                      List<ActionHandler> usedHandlers, List<StepResult> stepResults,
+                                      ExecutionTracker tracker) {
+        boolean condition = toBoolean(ctx.evaluateValue(block.getCondition()));
+        List<Object> thenBlocks = block.getThenBlocks();
+        List<Object> elseBlocks = block.getElseBlocks();
+        List<Object> chosen = condition ? thenBlocks : elseBlocks;
+        List<Object> other = condition ? elseBlocks : thenBlocks;
+
+        int chosenCount = ScenarioBlocks.countSteps(chosen);
+        adjustTotal(tracker, Math.max(chosenCount, ScenarioBlocks.countSteps(other)), chosenCount);
+        ConsoleUI.event("if", (condition ? "true" : "false")
+                + " → " + (condition ? "then" : "else")
+                + " (" + chosenCount + " step(s))");
+        return executeBlocks(chosen, ctx, usedHandlers, stepResults, tracker);
+    }
+
+    private StepResult executeForBlock(ForBlock block, ScenarioContext ctx,
+                                       List<ActionHandler> usedHandlers, List<StepResult> stepResults,
+                                       ExecutionTracker tracker) {
+        List<Object> items = resolveItems(block.getItems(), block.getVar(), ctx);
+        int perIteration = ScenarioBlocks.countSteps(block.getBlocks());
+        adjustTotal(tracker, perIteration, perIteration * items.size());
+        ConsoleUI.event("for", block.getVar() + " × " + items.size() + " item(s)");
+
+        String var = block.getVar();
+        String indexVar = block.getIndexVar();
+        Object previousValue = ctx.getVariable(var);
+        boolean hadValue = ctx.hasVariable(var);
+        Object previousIndex = indexVar == null ? null : ctx.getVariable(indexVar);
+        boolean hadIndex = indexVar != null && ctx.hasVariable(indexVar);
+
+        try {
+            for (int i = 0; i < items.size(); i++) {
+                Object item = items.get(i);
+                Map<String, String> templates = new LinkedHashMap<>();
+                templates.put(var, String.valueOf(item));
+                ctx.setVariable(var, item);
+                if (indexVar != null) {
+                    templates.put(indexVar, String.valueOf(i));
+                    ctx.setVariable(indexVar, i);
+                }
+
+                List<Object> resolved = resolveTemplates(block.getBlocks(), templates);
+                StepResult failure = executeBlocks(resolved, ctx, usedHandlers, stepResults, tracker);
+                if (failure != null) return failure;
+            }
+            return null;
+        } finally {
+            restoreVariable(ctx, var, hadValue, previousValue);
+            if (indexVar != null) {
+                restoreVariable(ctx, indexVar, hadIndex, previousIndex);
+            }
+        }
+    }
+
+    private StepResult executeWhileBlock(WhileBlock block, ScenarioContext ctx,
+                                         List<ActionHandler> usedHandlers, List<StepResult> stepResults,
+                                         ExecutionTracker tracker) {
+        int maxIterations = block.getMaxIterations() > 0
+                ? block.getMaxIterations()
+                : WhileBlock.DEFAULT_MAX_ITERATIONS;
+        int perIteration = ScenarioBlocks.countSteps(block.getBlocks());
+        ConsoleUI.event("while", "max " + maxIterations + " iteration(s)");
+
+        String indexVar = block.getIndexVar();
+        Object previousIndex = indexVar == null ? null : ctx.getVariable(indexVar);
+        boolean hadIndex = indexVar != null && ctx.hasVariable(indexVar);
+
+        try {
+            int i = 0;
+            while (true) {
+                if (i >= maxIterations) {
+                    throw new IllegalStateException("while loop exceeded max_iterations="
+                            + maxIterations + " (condition=" + block.getCondition() + ")");
+                }
+                if (indexVar != null) {
+                    ctx.setVariable(indexVar, i);
+                }
+                if (!toBoolean(ctx.evaluateValue(block.getCondition()))) {
+                    return null;
+                }
+                if (i > 0) {
+                    // 初始估算只包含 1 次迭代，每多执行一轮补充一次进度
+                    tracker.total += perIteration;
+                }
+                Map<String, String> templates = indexVar == null
+                        ? Map.of()
+                        : Map.of(indexVar, String.valueOf(i));
+                List<Object> resolved = resolveTemplates(block.getBlocks(), templates);
+                StepResult failure = executeBlocks(resolved, ctx, usedHandlers, stepResults, tracker);
+                if (failure != null) return failure;
+                i++;
+            }
+        } finally {
+            if (indexVar != null) {
+                restoreVariable(ctx, indexVar, hadIndex, previousIndex);
+            }
+        }
+    }
+
+    private StepResult executeSwitchBlock(SwitchBlock block, ScenarioContext ctx,
+                                          List<ActionHandler> usedHandlers, List<StepResult> stepResults,
+                                          ExecutionTracker tracker) {
+        Object value = ctx.evaluateValue(block.getExpression());
+        String key = value == null ? "null" : String.valueOf(value);
+        List<Object> chosen = block.getCases().get(key);
+        String label = chosen != null
+                ? key
+                : (block.getDefaultBlocks() == null || block.getDefaultBlocks().isEmpty() ? "(no match)" : "default");
+        if (chosen == null) {
+            chosen = block.getDefaultBlocks() == null ? List.of() : block.getDefaultBlocks();
+        }
+
+        int estimated = ScenarioBlocks.countSteps(block.getDefaultBlocks());
+        for (List<Object> caseBlocks : block.getCases().values()) {
+            estimated = Math.max(estimated, ScenarioBlocks.countSteps(caseBlocks));
+        }
+        adjustTotal(tracker, estimated, ScenarioBlocks.countSteps(chosen));
+
+        ConsoleUI.event("switch", key + " → " + label);
+        return executeBlocks(chosen, ctx, usedHandlers, stepResults, tracker);
+    }
+
+    /** Resolves {@code for.items} — literal list or SpEL expression returning a collection. */
+    private List<Object> resolveItems(Object raw, String varName, ScenarioContext ctx) {
+        Object evaluated = ctx.evaluateValue(raw);
+        if (evaluated == null) {
+            throw new IllegalStateException("for.items evaluated to null (var=" + varName + ")");
+        }
+        if (evaluated instanceof List<?> list) {
+            return new ArrayList<>(list);
+        }
+        if (evaluated instanceof Collection<?> collection) {
+            return new ArrayList<>(collection);
+        }
+        if (evaluated instanceof Iterable<?> iterable) {
+            List<Object> result = new ArrayList<>();
+            iterable.forEach(result::add);
+            return result;
+        }
+        throw new IllegalStateException("for.items must evaluate to a list/collection, got "
+                + evaluated.getClass().getName() + " (var=" + varName + ")");
+    }
+
+    /** Coerces a condition value to boolean — Boolean / Number / collection / string literal. */
+    private static boolean toBoolean(Object value) {
+        if (value == null) return false;
+        if (value instanceof Boolean b) return b;
+        if (value instanceof Number n) return n.doubleValue() != 0d;
+        if (value instanceof Collection<?> c) return !c.isEmpty();
+        if (value instanceof Map<?, ?> m) return !m.isEmpty();
+        String s = String.valueOf(value).trim();
+        if (s.isEmpty()) return false;
+        return switch (s.toLowerCase(Locale.ROOT)) {
+            case "false", "no", "n", "0", "off" -> false;
+            case "true", "yes", "y", "1", "on" -> true;
+            default -> true;
+        };
+    }
+
+    private static void adjustTotal(ExecutionTracker tracker, int estimated, int actual) {
+        tracker.total += actual - estimated;
+        if (tracker.total < tracker.index) {
+            tracker.total = tracker.index;
+        }
+    }
+
+    private static void restoreVariable(ScenarioContext ctx, String name, boolean existed, Object previous) {
+        if (existed) {
+            ctx.setVariable(name, previous);
+        } else {
+            ctx.removeVariable(name);
+        }
+    }
+
+    // ==================== Template substitution ====================
+
+    private static final Pattern TEMPLATE_PATTERN = Pattern.compile("\\$\\{([A-Za-z0-9_.\\-]+)}");
+
+    /**
+     * Deep-copies a block tree, replacing {@code ${var}} placeholders in step ids,
+     * inputs, outputs and hooks. Used to generate per-iteration step ids inside {@code for}.
+     */
+    private List<Object> resolveTemplates(List<Object> blocks, Map<String, String> variables) {
+        if (blocks == null) return List.of();
+        List<Object> resolved = new ArrayList<>(blocks.size());
+        for (Object block : blocks) {
+            resolved.add(resolveTemplateBlock(block, variables));
+        }
+        return resolved;
+    }
+
+    private Object resolveTemplateBlock(Object block, Map<String, String> variables) {
+        if (block instanceof StepConfig step) {
+            return copyStep(step, variables);
+        }
+        if (block instanceof ParallelBlock parallel) {
+            List<StepConfig> steps = new ArrayList<>(parallel.getSteps().size());
+            for (StepConfig step : parallel.getSteps()) {
+                steps.add(copyStep(step, variables));
+            }
+            return ParallelBlock.builder().steps(steps).build();
+        }
+        if (block instanceof IfBlock ifBlock) {
+            return IfBlock.builder()
+                    .condition(substituteValue(ifBlock.getCondition(), variables))
+                    .thenBlocks(resolveTemplates(ifBlock.getThenBlocks(), variables))
+                    .elseBlocks(resolveTemplates(ifBlock.getElseBlocks(), variables))
+                    .build();
+        }
+        if (block instanceof ForBlock forBlock) {
+            return ForBlock.builder()
+                    .var(forBlock.getVar())
+                    .indexVar(forBlock.getIndexVar())
+                    .items(substituteValue(forBlock.getItems(), variables))
+                    .blocks(resolveTemplates(forBlock.getBlocks(), variables))
+                    .build();
+        }
+        if (block instanceof WhileBlock whileBlock) {
+            return WhileBlock.builder()
+                    .condition(substituteValue(whileBlock.getCondition(), variables))
+                    .indexVar(whileBlock.getIndexVar())
+                    .maxIterations(whileBlock.getMaxIterations())
+                    .blocks(resolveTemplates(whileBlock.getBlocks(), variables))
+                    .build();
+        }
+        if (block instanceof SwitchBlock switchBlock) {
+            Map<String, List<Object>> cases = new LinkedHashMap<>();
+            switchBlock.getCases().forEach((key, caseBlocks) ->
+                    cases.put(key, resolveTemplates(caseBlocks, variables)));
+            return SwitchBlock.builder()
+                    .expression(substituteValue(switchBlock.getExpression(), variables))
+                    .cases(cases)
+                    .defaultBlocks(resolveTemplates(switchBlock.getDefaultBlocks(), variables))
+                    .build();
+        }
+        return block;
+    }
+
+    @SuppressWarnings("unchecked")
+    private StepConfig copyStep(StepConfig step, Map<String, String> variables) {
+        return StepConfig.builder()
+                .id(substituteString(step.getId(), variables))
+                .action(step.getAction())
+                .inputs((Map<String, Object>) substituteValue(step.getInputs(), variables))
+                .outputs((List<String>) substituteValue(step.getOutputs(), variables))
+                .timeoutSeconds(step.getTimeoutSeconds())
+                .keepAlive(step.isKeepAlive())
+                .hooks((Map<String, Object>) substituteValue(step.getHooks(), variables))
+                .extraDeps(step.getExtraDeps())
+                .use(step.getUse())
+                .stepClassLoader(step.getStepClassLoader())
+                .build();
+    }
+
+    @SuppressWarnings("unchecked")
+    private Object substituteValue(Object value, Map<String, String> variables) {
+        if (value == null) return null;
+        if (value instanceof String s) return substituteString(s, variables);
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> result = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                result.put(String.valueOf(entry.getKey()), substituteValue(entry.getValue(), variables));
+            }
+            return result;
+        }
+        if (value instanceof List<?> list) {
+            List<Object> result = new ArrayList<>(list.size());
+            for (Object item : list) {
+                result.add(substituteValue(item, variables));
+            }
+            return result;
+        }
+        return value;
+    }
+
+    private String substituteString(String value, Map<String, String> variables) {
+        if (value == null || value.isEmpty() || variables.isEmpty()) return value;
+        Matcher matcher = TEMPLATE_PATTERN.matcher(value);
+        StringBuilder builder = new StringBuilder();
+        boolean replaced = false;
+        while (matcher.find()) {
+            String replacement = variables.get(matcher.group(1));
+            if (replacement == null) {
+                matcher.appendReplacement(builder, Matcher.quoteReplacement(matcher.group()));
+            } else {
+                matcher.appendReplacement(builder, Matcher.quoteReplacement(replacement));
+                replaced = true;
+            }
+        }
+        matcher.appendTail(builder);
+        return replaced ? builder.toString() : value;
+    }
+
+    /** Mutable progress counters shared across nested control-flow blocks. */
+    private static final class ExecutionTracker {
+        private int index;
+        private int total;
+
+        private ExecutionTracker(int total) {
+            this.total = total;
+        }
     }
 
     // ==================== Preflight Helpers ====================
 
-    /** 从 scenario 所有 blocks（包括 parallel 内部）收集扁平的 StepConfig 列表。 */
+    /** 从 scenario 所有 blocks（包括 parallel / if / for / switch 内部）收集扁平的 StepConfig 列表。 */
     static List<StepConfig> collectAllSteps(ScenarioConfig scenario) {
-        List<StepConfig> result = new ArrayList<>();
-        for (Object block : scenario.getBlocks()) {
-            if (block instanceof StepConfig step) result.add(step);
-            else if (block instanceof ParallelBlock p) result.addAll(p.getSteps());
-        }
-        return result;
+        return ScenarioBlocks.collectSteps(scenario.getBlocks());
     }
 
     /**

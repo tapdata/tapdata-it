@@ -1,6 +1,6 @@
 package io.tapdata.it.l3.cli;
 
-import io.tapdata.it.l3.common.ParallelBlock;
+import io.tapdata.it.l3.common.ScenarioBlocks;
 import io.tapdata.it.l3.common.ScenarioConfig;
 import io.tapdata.it.l3.common.StepConfig;
 import io.tapdata.it.l3.core.L3CoreApplication;
@@ -320,14 +320,9 @@ public class L3CliApplication implements Runnable {
 
     // ==================== validate 子命令辅助方法（CLI 本地版，避免依赖 ScenarioRunner private 方法） ====================
 
-    /** 从 scenario 所有 blocks 收集扁平的 StepConfig 列表。 */
+    /** 从 scenario 所有 blocks 收集扁平的 StepConfig 列表（含 if / for / switch 嵌套分支）。 */
     private static List<StepConfig> collectAllStepsLocal(ScenarioConfig scenario) {
-        List<StepConfig> result = new ArrayList<>();
-        for (Object block : scenario.getBlocks()) {
-            if (block instanceof StepConfig step) result.add(step);
-            else if (block instanceof ParallelBlock p) result.addAll(p.getSteps());
-        }
-        return result;
+        return ScenarioBlocks.collectSteps(scenario.getBlocks());
     }
 
     /** CLI 版单 step preflight 校验 —— 框架级 + handler 级。 */
