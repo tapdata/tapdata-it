@@ -57,6 +57,7 @@ public class MavenPluginResolver {
     private final DefaultRepositorySystemSession session;
     private final List<RemoteRepository> remoteRepos;
     private final Path localRepoDir;
+    private final ProxyConfig proxyConfig;
 
     /**
      * 下载并发线程池 —— 用于 resolveWithDependencies / resolveArtifact 的并发下载。
@@ -168,6 +169,11 @@ public class MavenPluginResolver {
         // 忽略 pom 里 <repositories> 声明的额外仓库 —— 只用我们显式配置的这些
         session.setIgnoreArtifactDescriptorRepositories(true);
 
+        // 统一代理配置：手动下载 + Maven Resolver 共用同一份
+        // 优先级：JVM 系统属性 → 环境变量 → ~/.m2/settings.xml → 系统 ProxySelector
+        this.proxyConfig = ProxyConfig.load();
+        this.proxyConfig.applyTo(session);
+
         // 3. Build remote repos — URL 规范化 + 自动 discover 子仓库 + 去重 + 兜底 Maven Central
         this.remoteRepos = new ArrayList<>();
         Set<String> seen = new HashSet<>();
@@ -189,6 +195,12 @@ public class MavenPluginResolver {
             this.remoteRepos.add(new RemoteRepository.Builder("central", "default",
                     "https://repo.maven.apache.org/maven2/").build());
         }
+
+        // 关键：HttpTransporter 读的是 RemoteRepository.getProxy()，不是 session.getProxySelector()。
+        // 必须通过 newResolutionRepositories 把 session 的代理/认证配置落到每个仓库上，否则代理不生效。
+        List<RemoteRepository> resolvedRepos = repositorySystem.newResolutionRepositories(session, this.remoteRepos);
+        this.remoteRepos.clear();
+        this.remoteRepos.addAll(resolvedRepos);
 
         // Clamp + 创建下载线程池
         int c = Math.max(1, downloadConcurrency);
@@ -285,72 +297,107 @@ public class MavenPluginResolver {
             }
         }
 
-        // 先手动下载 jar + pom 到本地 Maven 仓库 —— 绕过 Aether HttpClient 的代理/SSL 问题
-        // （Aether 不读 JVM https.proxy* 系统属性，内部 Apache HttpClient 5 有独立配置）
-        // 如果手动下载成功或本地已有，直接返回路径，跳过 Maven Resolver（它还会尝试网络）
-        Path locallyResolved = tryManualDownload(artifact);
-        if (locallyResolved != null) {
-            log.info("[MavenPluginResolver] Using locally available jar: {}", locallyResolved);
-            return locallyResolved;
-        }
-
-        // 最后兜底：让 Maven Resolver 自己 resolve（可能失败，但保证不丢任何能 resolve 的情况）
-        try {
-            ArtifactRequest request = new ArtifactRequest(artifact, remoteRepos, null);
-            ArtifactResult result = repositorySystem.resolveArtifact(session, request);
-            Path jarPath = result.getArtifact().getFile().toPath();
-            log.info("[MavenPluginResolver] Resolved artifact {} → {}", coordinate, jarPath);
-            return jarPath;
-        } catch (Exception e) {
-            throw new ResolutionException("Failed to resolve artifact: " + coordinate, e);
-        }
-    }
-
-    /** 尝试手动下载，成功或本地已存在时返回 jar 路径，否则返回 null。 */
-    private Path tryManualDownload(Artifact artifact) {
-        // 先检查本地 Maven 仓库是否已经有了（包括可能的 timestamped 变体）
+        // 1) 本地同版本优先：只认 artifactId-version.jar，绝不回退到同 artifact 的其他版本
         Path localJar = findLocalJar(artifact);
         if (localJar != null) {
-            log.debug("[MavenPluginResolver] Found existing jar locally: {}", localJar);
+            log.info("[MavenPluginResolver] Using locally available jar: {}", localJar);
             return localJar;
         }
 
-        // 手动下载到本地仓库
-        manuallyDownloadArtifactToLocal(artifact);
-        return findLocalJar(artifact);
+        // 2) 本地没有同版本 → 网络下载。先手动下载（绕过 Aether HttpClient 的代理/SSL 问题），
+        //    Maven Resolver 作为兜底下载通道。
+        List<String> attempts = new ArrayList<>();
+        Path downloaded = manuallyDownloadArtifactToLocal(artifact, attempts);
+        if (downloaded != null) {
+            log.info("[MavenPluginResolver] Downloaded jar: {}", downloaded);
+            return downloaded;
+        }
+
+        Exception resolverError = null;
+        try {
+            ArtifactRequest request = new ArtifactRequest(artifact, remoteRepos, null);
+            ArtifactResult result = repositorySystem.resolveArtifact(session, request);
+            Path jarPath = result.getArtifact().getFile() != null
+                    ? result.getArtifact().getFile().toPath() : null;
+            if (jarPath != null && Files.isRegularFile(jarPath)) {
+                log.info("[MavenPluginResolver] Resolved artifact {} → {}", coordinate, jarPath);
+                return jarPath;
+            }
+            resolverError = new IllegalStateException("Maven Resolver returned no jar file");
+        } catch (Exception e) {
+            resolverError = e;
+        }
+
+        // 3) 下载失败 → 直接报错，输出定位所需的关键信息（不再静默使用其他版本）
+        Path expectedLocalJar = expectedLocalJarPath(artifact);
+        StringBuilder msg = new StringBuilder("Failed to resolve artifact: ").append(coordinate)
+                .append(" | local repo: ").append(localRepoDir)
+                .append(" | expected local jar: ").append(expectedLocalJar)
+                .append(" | remote repos: ").append(remoteRepos.stream()
+                        .map(RemoteRepository::getUrl).toList());
+        if (proxyConfig.isConfigured()) {
+            msg.append(" | proxy: ").append(proxyConfig.summary());
+        }
+        if (!attempts.isEmpty()) {
+            msg.append(" | download attempts: ").append(attempts);
+        }
+        msg.append(" | resolver error: ").append(rootMessage(resolverError));
+        throw new ResolutionException(msg.toString(), resolverError);
     }
 
-    /** 查找本地仓库中是否已有对应 artifact 的 jar（处理 SNAPSHOT timestamped 变体）。 */
+    /**
+     * 查找本地仓库中与坐标版本严格一致的 jar。
+     * <p>
+     * 只接受 {@code artifactId-<version>.jar}；timestamped SNAPSHOT 额外允许
+     * {@code <base>-SNAPSHOT/artifactId-<timestamped>.jar} 与本地安装的
+     * {@code <base>-SNAPSHOT/artifactId-<base>-SNAPSHOT.jar}。
+     * 找不到返回 {@code null}，由调用方走网络下载 —— 绝不回退到其他版本。
+     */
     private Path findLocalJar(Artifact artifact) {
         String groupPath = artifact.getGroupId().replace('.', '/');
         String version = artifact.getVersion();
         String artifactId = artifact.getArtifactId();
         String artifactPath = groupPath + "/" + artifactId;
 
-        // 可能的本地目录名：
-        // 1. timestamped SNAPSHOT (e.g., 1.0.0-20261103.090048-1)
-        // 2. 原始 SNAPSHOT (e.g., 1.0.0-SNAPSHOT)
-        // 3. release 版本 (e.g., 1.0.0)
-        List<String> possibleDirs = new ArrayList<>();
-        possibleDirs.add(version);
-        possibleDirs.add(version + "-SNAPSHOT");
-        possibleDirs.add(version.replaceAll("-\\d{8}\\.\\d{6}-\\d+$", "") + "-SNAPSHOT");
+        List<String> candidateDirs = new ArrayList<>();
+        List<String> candidateFileVersions = new ArrayList<>();
+        candidateDirs.add(version);
+        candidateFileVersions.add(version);
 
-        for (String dir : possibleDirs) {
-            Path jarPath = localRepoDir.resolve(artifactPath + "/" + dir + "/" + artifactId + "-" + version + ".jar");
-            if (Files.exists(jarPath)) return jarPath;
-            // 也试试原始 SNAPSHOT 文件名（不带 timestamp）
-            Path snapPath = localRepoDir.resolve(artifactPath + "/" + dir + "/" + artifactId + "-"
-                    + (dir.contains("-SNAPSHOT") ? dir : version) + ".jar");
-            if (Files.exists(snapPath)) return snapPath;
+        // timestamped SNAPSHOT (e.g. 1.0.0-20261103.090048-1)
+        if (version.matches(".*-\\d{8}\\.\\d{6}-\\d+$")) {
+            String baseSnapshot = version.replaceAll("-\\d{8}\\.\\d{6}-\\d+$", "") + "-SNAPSHOT";
+            // Maven 也可能把它放在 <base>-SNAPSHOT 目录下
+            candidateDirs.add(baseSnapshot);
+            // 本地 install 的原始 SNAPSHOT jar 同属该版本族
+            candidateFileVersions.add(baseSnapshot);
         }
 
-        // 遍历扫描 artifact 目录下所有子目录
-        try (var walk = Files.walk(localRepoDir.resolve(artifactPath), 2)) {
-            return walk.filter(p -> Files.isRegularFile(p) && p.toString().endsWith(".jar"))
-                    .findFirst().orElse(null);
-        } catch (Exception ignored) { }
+        for (String dir : candidateDirs) {
+            for (String fileVersion : candidateFileVersions) {
+                Path jar = localRepoDir.resolve(
+                        artifactPath + "/" + dir + "/" + artifactId + "-" + fileVersion + ".jar");
+                if (Files.isRegularFile(jar)) return jar;
+            }
+        }
         return null;
+    }
+
+    /** 坐标对应的本地标准 jar 路径（用于错误提示）。 */
+    private Path expectedLocalJarPath(Artifact artifact) {
+        return localRepoDir.resolve(artifact.getGroupId().replace('.', '/') + "/" + artifact.getArtifactId()
+                + "/" + artifact.getVersion() + "/" + artifact.getArtifactId() + "-" + artifact.getVersion() + ".jar");
+    }
+
+    /** 取异常链最底层的信息，避免错误提示只显示外层包装异常。 */
+    private static String rootMessage(Throwable t) {
+        if (t == null) return "unknown";
+        Throwable cur = t;
+        while (cur.getCause() != null && cur.getCause() != cur) {
+            cur = cur.getCause();
+        }
+        String m = cur.getMessage();
+        return cur.getClass().getSimpleName() + (m == null || m.isBlank() ? "" : ": " + m);
     }
 
     /**
@@ -362,8 +409,11 @@ public class MavenPluginResolver {
      *   <li>远端 Nexus: {@code .../1.0.0-SNAPSHOT/artifact-1.0.0-20261103.090048-1.jar}（目录是 SNAPSHOT 版本，文件名是 timestamped）</li>
      *   <li>本地仓库: {@code .../1.0.0-20261103.090048-1/artifact-1.0.0-20261103.090048-1.jar}（目录和文件名都是 timestamped）</li>
      * </ul>
+     *
+     * @param attempts 收集每个候选 URL 的失败原因，供最终异常输出
+     * @return 下载成功后的本地 jar 路径；全部失败返回 {@code null}
      */
-    private void manuallyDownloadArtifactToLocal(Artifact artifact) {
+    private Path manuallyDownloadArtifactToLocal(Artifact artifact, List<String> attempts) {
         String groupPath = artifact.getGroupId().replace('.', '/');
         String version = artifact.getVersion();
         // timestamped SNAPSHOT 版本匹配 \d+.\d+.\d+-\d{8}.\d{6}-\d+
@@ -383,13 +433,14 @@ public class MavenPluginResolver {
         Path localPom = localDir.resolve(pomFilename);
 
         // 如果本地已经有了，跳过
-        if (Files.exists(localJar)) return;
+        if (Files.isRegularFile(localJar)) return localJar;
 
         try {
             Files.createDirectories(localDir);
         } catch (IOException e) {
+            attempts.add("cannot create local dir " + localDir + " (" + e.getMessage() + ")");
             log.warn("[MavenPluginResolver] Cannot create local dir {}: {}", localDir, e.getMessage());
-            return;
+            return null;
         }
 
         // 创建 trust-all SSLSocketFactory
@@ -413,33 +464,44 @@ public class MavenPluginResolver {
             // 下载 jar
             String jarUrl = baseUrl + repoArtifactPath + "/" + jarFilename;
             log.info("[MavenPluginResolver] Attempting manual download: {}", jarUrl);
-            if (downloadUrlToFile(jarUrl, localJar, socketFactory)) {
+            String failure = downloadUrlToFile(jarUrl, localJar, socketFactory);
+            if (failure == null) {
                 log.info("[MavenPluginResolver] Downloaded jar from {} → {}", jarUrl, localJar);
                 // 尝试下载 pom（可选）
                 String pomUrl = baseUrl + repoArtifactPath + "/" + pomFilename;
                 downloadUrlToFile(pomUrl, localPom, socketFactory);
-                return;
+                return localJar;
             }
+            attempts.add(jarUrl + " → " + failure);
         }
         log.warn("[MavenPluginResolver] Failed to manually download {} from any repo", artifact);
+        return null;
     }
 
-    /** 用 HttpURLConnection 下载 URL 到本地文件。自动设置系统代理 + trust-all SSL。 */
-    private boolean downloadUrlToFile(String urlStr, Path target, javax.net.ssl.SSLSocketFactory socketFactory) {
+    /**
+     * 用 HttpURLConnection 下载 URL 到本地文件。应用统一 ProxyConfig + trust-all SSL。
+     *
+     * @return 成功返回 {@code null}；失败返回失败原因（HTTP 状态码或异常信息）
+     */
+    private String downloadUrlToFile(String urlStr, Path target, javax.net.ssl.SSLSocketFactory socketFactory) {
         try {
+            java.net.URI uri = java.net.URI.create(urlStr);
             java.net.URL url = new java.net.URL(urlStr);
             boolean isHttps = url.getProtocol().equals("https");
-            java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
+            java.net.Proxy proxy = proxyConfig.proxyFor(uri);
+            java.net.URLConnection opened = proxy != null ? url.openConnection(proxy) : url.openConnection();
+            java.net.HttpURLConnection conn = (java.net.HttpURLConnection) opened;
             if (isHttps && socketFactory != null) {
                 javax.net.ssl.HttpsURLConnection hc = (javax.net.ssl.HttpsURLConnection) conn;
                 hc.setSSLSocketFactory(socketFactory);
                 hc.setHostnameVerifier((hostname, session) -> true);
             }
+            proxyConfig.applyAuth(conn, uri);
             conn.setConnectTimeout(10_000);
             conn.setReadTimeout(30_000);
             conn.connect();
             int code = conn.getResponseCode();
-            if (code != 200) return false;
+            if (code != 200) return "HTTP " + code;
 
             try (java.io.InputStream in = conn.getInputStream();
                  java.io.OutputStream out = Files.newOutputStream(target)) {
@@ -447,12 +509,12 @@ public class MavenPluginResolver {
                 int n;
                 while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
             }
-            return true;
+            return null;
         } catch (Exception e) {
             log.debug("[MavenPluginResolver] Download {} failed: {}", urlStr, e.getMessage());
             // 清理可能写了一半的文件
             try { Files.deleteIfExists(target); } catch (IOException ignored) { }
-            return false;
+            return e.getClass().getSimpleName() + (e.getMessage() == null ? "" : ": " + e.getMessage());
         }
     }
 
@@ -579,6 +641,10 @@ public class MavenPluginResolver {
             } catch (Exception e) {
                 Throwable cause = e instanceof ExecutionException || e instanceof CompletionException
                         ? e.getCause() : e;
+                // 保留 resolveArtifact 里拼好的关键错误信息，不要用泛化消息覆盖
+                if (cause instanceof ResolutionException resolutionException) {
+                    throw resolutionException;
+                }
                 throw new ResolutionException("Failed to resolve artifact: " + uniqueCoords.get(i), cause);
             }
         }

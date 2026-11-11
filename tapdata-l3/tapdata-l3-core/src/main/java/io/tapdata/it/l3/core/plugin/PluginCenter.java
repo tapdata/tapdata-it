@@ -561,7 +561,8 @@ public class PluginCenter {
                 Path jar = mavenResolver.resolveArtifact(coord);
                 newDeps.add(jar);
             } catch (MavenPluginResolver.ResolutionException e) {
-                throw new PluginLoadException("Failed to resolve dep: " + coord, e);
+                // 保留 resolver 给出的关键错误信息（远程仓库、下载尝试、失败原因）
+                throw new PluginLoadException("Failed to resolve dep: " + e.getMessage(), e);
             }
         }
 
