@@ -162,19 +162,29 @@ public class DeployTapdataAction extends BaseStep {
         tmpValues.delete();
 
         // ---- 9. helm upgrade --install（幂等：首次安装 / 重跑升级均可，values 变化触发滚动更新）----
+        // --wait 会等 Pod Ready。chart 已配 startupProbe（900s 窗口），Ready 需等 TM 真正监听 3030
+        // （实测冷启动约 7~8 分钟），所以 helm 超时必须大于 startupProbe 窗口。
         String helmInstall = String.format(
                 "helm upgrade --install %s %s -n %s --create-namespace " +
-                        "--wait --timeout 600s -f %s",
+                        "--wait --timeout 900s -f %s",
                 helmRelease, REMOTE_CHART, namespace, REMOTE_VALUES);
-        k8s.exec(helmInstall, 600_000L).assertSuccess("helm upgrade --install " + helmRelease);
+        k8s.exec(helmInstall, 950_000L).assertSuccess("helm upgrade --install " + helmRelease);
 
-        // ---- 10. 等待所有 TapData Pod ready ----
+        // ---- 10. 就绪断言：kubectl wait Ready + Running Pod 计数 ----
+        // helm --wait 在 release 已存在且无变化时直接返回，不能作为就绪依据 —— 必须独立断言。
         K8sClient.ExecResult pods = k8s.exec(
                 "kubectl -n " + namespace + " get pods " +
                         "-l app.kubernetes.io/instance=" + helmRelease +
                         " -o wide");
         if (pods.isSuccess()) {
             log.info("[deploy_tapdata] pods:\n{}", pods.stdout);
+        }
+        int minReadyPods = resolveMinReadyPods(p);
+        try {
+            assertPodsReady(k8s, namespace, minReadyPods);
+        } catch (Exception e) {
+            dumpDeployDiagnostics(k8s, namespace);
+            throw e;
         }
 
         log.info("[deploy_tapdata] DONE — namespace={}", namespace);
@@ -185,6 +195,63 @@ public class DeployTapdataAction extends BaseStep {
         outputs.put("image", imageRepo);
         outputs.put("harborRegistry", p.getHarborRegistry());
         return success(outputs);
+    }
+
+    // ========================================================================
+    // 就绪断言 + 失败诊断
+    // ========================================================================
+
+    /** min_ready_pods 显式指定优先；否则 = server + engine + apiserver 副本之和（至少 1）。 */
+    private static int resolveMinReadyPods(DeployTapdataParameter p) {
+        if (p.getMinReadyPods() != null && p.getMinReadyPods() >= 0) return p.getMinReadyPods();
+        int total = nvl(p.getServerReplicas()) + nvl(p.getEngineReplicas()) + nvl(p.getApiserverReplicas());
+        return Math.max(1, total);
+    }
+
+    private static int nvl(Integer v) {
+        return v == null ? 1 : v;
+    }
+
+    /**
+     * 真正的就绪断言（专有 namespace，用 --all 即可覆盖全部 TapData Pod）：
+     * 1. kubectl wait --for=condition=Ready —— 所有 Pod 达到 Ready（0 Pod 时直接失败，杜绝空部署假成功）；
+     * 2. Running Pod 计数 >= min_ready_pods —— 防止只起了部分组件。
+     */
+    private void assertPodsReady(K8sClient k8s, String namespace, int minReadyPods) throws Exception {
+        K8sClient.ExecResult wait = k8s.exec(
+                "kubectl -n " + namespace + " wait --for=condition=Ready pod --all --timeout=300s",
+                320_000L);
+        if (!wait.isSuccess()) {
+            throw new RuntimeException("Pods not Ready within 300s in namespace '" + namespace
+                    + "': " + wait.getStdoutTrimmed());
+        }
+        K8sClient.ExecResult count = k8s.exec(
+                "kubectl -n " + namespace + " get pods --field-selector=status.phase=Running --no-headers | wc -l");
+        int running = -1;
+        try { running = Integer.parseInt(count.getStdoutTrimmed()); } catch (NumberFormatException ignored) {}
+        if (running < minReadyPods) {
+            throw new RuntimeException("Ready-pod count assertion failed: running=" + running
+                    + ", expected >= " + minReadyPods + " in namespace '" + namespace + "'");
+        }
+        log.info("[deploy_tapdata] readiness OK — running pods={} (min={})", running, minReadyPods);
+    }
+
+    /** 就绪断言失败时 dump 诊断信息（pods/events/replicaset events）到 step 日志。 */
+    private void dumpDeployDiagnostics(K8sClient k8s, String namespace) {
+        log.warn("[deploy_tapdata] readiness assertion FAILED — dumping diagnostics for ns={}", namespace);
+        String[] diags = {
+                "kubectl -n " + namespace + " get pods -o wide",
+                "kubectl -n " + namespace + " get events --sort-by=.lastTimestamp 2>/dev/null | tail -40",
+                "kubectl -n " + namespace + " describe replicasets 2>/dev/null | grep -A8 'Events:' | head -60",
+        };
+        for (String cmd : diags) {
+            try {
+                K8sClient.ExecResult r = k8s.exec(cmd, 60_000L);
+                log.warn("[deploy_tapdata] diag `${}`:\n{}", cmd, r.getStdoutTrimmed());
+            } catch (Exception e) {
+                log.warn("[deploy_tapdata] diag `{}` failed: {}", cmd, e.getMessage());
+            }
+        }
     }
 
     // ========================================================================

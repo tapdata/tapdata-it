@@ -77,6 +77,13 @@ spec:
               value: "{{ .Values.global.mongodb.password }}"
             - name: MONGODB_USER
               value: "{{ .Values.global.mongodb.user }}"
+          # 启动探针 —— TM Java 进程冷启动通常需要 5~10 分钟（首次部署更久）。
+          # 没有 startupProbe 时 livenessProbe 到点即判失败并 SIGKILL（Exit Code 137），
+          # 造成慢启动 Pod 反复 crash-loop 永远起不来。配置后 liveness 在启动成功前不生效。
+          {{- if .Values.startupProbe.enabled }}
+          startupProbe:
+            {{- omit .Values.startupProbe "enabled" | toYaml | nindent 12 }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /health

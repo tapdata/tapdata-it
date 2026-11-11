@@ -525,4 +525,7 @@ steps:
       namespace: "tapdata-ha"
       helm_release: "tapdata"
       host: "localhost"
+      # 本场景的 TM 资源（任务/连接/校验）创建在本环境的 TM 上 — 环境已卸载，
+      # 取消挂起的 "tm" 清理钩子，避免清理阶段对已消失的 TM 逐个重试（即使有熔断也要等 ~1min）
+      cancel_pending_cleanups: true
     timeout_seconds: 300

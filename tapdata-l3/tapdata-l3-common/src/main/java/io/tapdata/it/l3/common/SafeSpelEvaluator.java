@@ -48,6 +48,9 @@ public class SafeSpelEvaluator {
     /** Raw step outputs (stepId → outputs map) — used for null-safety validation (key existence checks). */
     private final Map<String, ? extends Map<String, Object>> stepOutputsRaw;
 
+    /** Scenario env map — exposed as {@code #env['KEY']}. Defaults to empty; set via {@link #registerEnv}. */
+    private Map<String, Object> env = Map.of();
+
     public SafeSpelEvaluator(Map<String, Object> variables,
                              Map<String, ? extends Object> stepOutputsWrapped,
                              Map<String, ? extends Map<String, Object>> stepOutputsRaw) {
@@ -59,6 +62,17 @@ public class SafeSpelEvaluator {
         this.context = SimpleEvaluationContext.forReadOnlyDataBinding().build();
         context.setVariable("variables", variables);
         context.setVariable("steps", stepOutputsWrapped);
+        // #env must always exist (empty map until setEnv) so #env['KEY'] resolves to null
+        // instead of failing with "EL1007E Property or field 'env' cannot be found on null".
+        context.setVariable("env", env);
+    }
+
+    /**
+     * Register the scenario env map — enables {@code #env['KEY']} access.
+     * Called by ScenarioContext.setEnv (via ScenarioRunner) before steps execute.
+     */
+    public void registerEnv(Map<String, Object> envMap) {
+        context.setVariable("env", envMap != null ? envMap : Map.of());
     }
 
     /** Back-compat constructor — only used by tests. */

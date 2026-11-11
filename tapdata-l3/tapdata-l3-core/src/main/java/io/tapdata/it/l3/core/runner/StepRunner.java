@@ -95,14 +95,49 @@ public class StepRunner {
             long durationMs = (System.nanoTime() - t0) / 1_000_000;
             log.debug("[Step] '{}' → {} [SUCCESS] ({}ms)", stepConfig.getId(),
                     stepConfig.getAction(), durationMs);
+            // expect_failure 反向断言：step 意外成功 → 判失败
+            if (stepConfig.isExpectFailure()) {
+                String msg = String.format(
+                        "expect_failure=true but step '%s' (%s) SUCCEEDED — expected this step to fail",
+                        stepConfig.getId(), stepConfig.getAction());
+                log.warn("[Step] {}", msg);
+                return StepResult.failure(stepConfig, new AssertionError(msg), durationMs,
+                        snapshotOutputs(stepConfig.getId(), ctx));
+            }
             return StepResult.success(stepConfig, durationMs, snapshotOutputs(stepConfig.getId(), ctx));
         } catch (Throwable t) {
             long durationMs = (System.nanoTime() - t0) / 1_000_000;
             log.debug("[Step] '{}' → {} [FAILED] ({}ms)", stepConfig.getId(),
                     stepConfig.getAction(), durationMs, t);
+            // expect_failure: 失败即通过（可选错误消息子串断言）
+            if (stepConfig.isExpectFailure()) {
+                String actualMsg = t.getMessage() == null ? "" : t.getMessage();
+                if (stepConfig.getExpectFailureMessage() != null && !stepConfig.getExpectFailureMessage().isBlank()
+                        && !actualMsg.contains(stepConfig.getExpectFailureMessage())) {
+                    String msg = String.format(
+                            "expect_failure_message='%s' not matched — actual error: %s: %s",
+                            stepConfig.getExpectFailureMessage(), t.getClass().getSimpleName(), actualMsg);
+                    log.warn("[Step] '{}' {}", stepConfig.getId(), msg);
+                    return StepResult.failure(stepConfig, new AssertionError(msg), durationMs,
+                            snapshotOutputs(stepConfig.getId(), ctx));
+                }
+                ConsoleUI.event("expect_failure", "step '" + stepConfig.getId()
+                        + "' failed as expected (" + t.getClass().getSimpleName() + ")");
+                log.info("[Step] '{}' failed as expected (expect_failure=true): {}",
+                        stepConfig.getId(), t.toString());
+                return StepResult.success(stepConfig, durationMs,
+                        withExpectedFailureMark(snapshotOutputs(stepConfig.getId(), ctx)));
+            }
             return StepResult.failure(stepConfig, t, durationMs,
                     snapshotOutputs(stepConfig.getId(), ctx));
         }
+    }
+
+    /** Mark a tolerated (expect_failure) result in its output snapshot so reports show why it passed. */
+    private static Map<String, Object> withExpectedFailureMark(Map<String, Object> outputs) {
+        Map<String, Object> marked = new LinkedHashMap<>(outputs);
+        marked.put("expected_failure", true);
+        return marked;
     }
 
     /** 快照本 Step 注册到 ScenarioContext 的 outputs —— 供报告采集指标使用。 */

@@ -288,12 +288,27 @@ public class MavenPluginResolver {
     public Path resolveArtifact(String coordinate) throws ResolutionException {
         Artifact artifact = parseCoordinate(coordinate);
 
-        // SNAPSHOT 版本手动从 metadata 解析 timestamped 实际版本
+        // 0) 本地优先（含本地安装的 base -SNAPSHOT jar）—— 不发任何网络请求。
+        //    批量运行时每个 scenario 的 deps 预加载都会走到这里；若每次都先请求远端
+        //    SNAPSHOT metadata（还有 SSL/代理开销），13 个用例要多花数分钟。
+        Path localJarFirst = findLocalJar(artifact);
+        if (localJarFirst != null) {
+            log.info("[MavenPluginResolver] Using locally available jar (no remote check): {}", localJarFirst);
+            return localJarFirst;
+        }
+
+        // SNAPSHOT 版本手动从 metadata 解析 timestamped 实际版本（本地没有才走网络）
         if (artifact.getVersion().endsWith("-SNAPSHOT")) {
             String resolvedVersion = resolveSnapshotVersion(artifact);
             if (resolvedVersion != null) {
                 artifact = artifact.setVersion(resolvedVersion);
                 log.info("[MavenPluginResolver] SNAPSHOT {} → resolved to {}", coordinate, resolvedVersion);
+                // timestamped 版本本地可能已存在（上一轮下载过）——命中则同样跳过下载
+                Path localTimestamped = findLocalJar(artifact);
+                if (localTimestamped != null) {
+                    log.info("[MavenPluginResolver] Using locally available timestamped jar: {}", localTimestamped);
+                    return localTimestamped;
+                }
             }
         }
 
@@ -676,11 +691,13 @@ public class MavenPluginResolver {
                     repositorySystem.collectDependencies(session, collectRequest));
             CollectResult collectResult;
             try {
-                collectResult = collectFuture.get(30, TimeUnit.SECONDS);
+                // 120s — 远端 nexus 走代理时 POM 元数据抓取较慢，30s 会把传递依赖整体砍掉
+                //（典型后果：dbforge/jdbc step 缺 mysql-connector 驱动）
+                collectResult = collectFuture.get(120, TimeUnit.SECONDS);
             } catch (TimeoutException te) {
                 collectFuture.cancel(true);
                 oneShot.shutdownNow();
-                log.warn("[MavenPluginResolver] collectDependencies timed out after 30s — " +
+                log.warn("[MavenPluginResolver] collectDependencies timed out after 120s — " +
                         "falling back to direct jars only (transitive deps skipped)");
                 return result;
             }

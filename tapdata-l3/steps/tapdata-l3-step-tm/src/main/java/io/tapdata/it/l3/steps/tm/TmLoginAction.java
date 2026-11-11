@@ -49,6 +49,14 @@ public class TmLoginAction extends BaseStep {
         return "tm_login";
     }
 
+    /** 建议超时 = wait_timeout_seconds + 30s 余量（agent 就绪探测的内部等待上限）。 */
+    @Override
+    public int getRecommendedTimeoutSeconds(StepConfig config) {
+        Object raw = config.getInputs() == null ? null : config.getInputs().get("wait_timeout_seconds");
+        int waitTimeout = raw instanceof Number n ? n.intValue() : 180;
+        return waitTimeout + 30;
+    }
+
     @Override
     protected StepResult doExecute(StepConfig config, ScenarioContext ctx) throws Exception {
         TmLoginParameter p = config.getInputParameterConfig(TmLoginParameter.class);

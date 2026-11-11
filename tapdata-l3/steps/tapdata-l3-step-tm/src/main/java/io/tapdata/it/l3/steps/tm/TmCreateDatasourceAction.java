@@ -151,7 +151,7 @@ public class TmCreateDatasourceAction extends BaseStep {
 
         // Auto-cleanup unless keep_alive
         if (!config.isKeepAlive() && connectionId != null) {
-            ctx.registerCleanup(() -> {
+            ctx.registerCleanup("tm", () -> {
                 try {
                     log.info("[TM] Auto-deleting Connection {}", connectionId);
                     client.delete("/api/Connections/" + connectionId);

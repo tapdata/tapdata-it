@@ -55,6 +55,14 @@ public class TmWaitTaskFailoverAction extends BaseStep {
         return "tm_wait_task_failover";
     }
 
+    /** 建议超时 = wait_timeout_seconds + 120s 余量（杀 pod + 重调度 + 任务重跑的内部上限更长）。 */
+    @Override
+    public int getRecommendedTimeoutSeconds(StepConfig config) {
+        Object raw = config.getInputs() == null ? null : config.getInputs().get("wait_timeout_seconds");
+        int waitTimeout = raw instanceof Number n ? n.intValue() : 300;
+        return waitTimeout + 120;
+    }
+
     @Override
     protected StepResult doExecute(StepConfig config, ScenarioContext ctx) throws Exception {
         TmWaitTaskFailoverParameter p = config.getInputParameterConfig(TmWaitTaskFailoverParameter.class);

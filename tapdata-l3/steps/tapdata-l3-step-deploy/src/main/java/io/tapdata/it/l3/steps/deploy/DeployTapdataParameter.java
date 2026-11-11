@@ -105,4 +105,10 @@ public class DeployTapdataParameter extends ParameterConfig {
      * 互斥：设置后 artifact_url 不再必填。
      */
     private String prebuiltImage;
+
+    /**
+     * 就绪断言的最少 Running Pod 数 — 默认 = server + engine + apiserver 副本之和。
+     * 设为 0 可关闭计数断言（kubectl wait Ready 断言仍生效）。
+     */
+    private Integer minReadyPods;
 }

@@ -42,6 +42,15 @@ public class TmClient {
     /** 网关错误 (502/503/504) 重试次数与间隔 — 覆盖多 TM 节点滚动重启的瞬时不就绪。 */
     private static final int GATEWAY_RETRY_MAX = 12;
     private static final long GATEWAY_RETRY_INTERVAL_MS = 5_000L;
+    /**
+     * 连续网关错误熔断阈值（≈ 一轮完整重试的尝试次数）。达到后所有请求立即失败，
+     * 不再逐个耗尽 12×5s 重试 — 典型场景：undeploy 后清理钩子对已消失的 TM 资源逐个重试，
+     * 熔断把清理风暴从 ~8min 降到 ~1min。
+     */
+    private static final int GATEWAY_BREAKER_THRESHOLD = GATEWAY_RETRY_MAX;
+    /** 连续网关错误计数 — 任一请求成功即清零。 */
+    private final java.util.concurrent.atomic.AtomicInteger consecutiveGatewayFailures =
+            new java.util.concurrent.atomic.AtomicInteger();
 
     /** Default TM for L3 IT environments — can be overridden via config/env/property. */
     private static final String DEFAULT_URL = "http://192.168.1.190:24021";
@@ -140,6 +149,7 @@ public class TmClient {
                 long createdMs = System.currentTimeMillis();
                 long expiresAt = createdMs + ttlSeconds * 1000L;
                 cached.set(new CachedToken(token, expiresAt));
+                consecutiveGatewayFailures.set(0);
                 log.info("[TM] Token acquired, ttl={}s, expiresIn={}min", ttlSeconds, (expiresAt - createdMs) / 60000);
                 return token;
             } catch (Exception e) {
@@ -147,6 +157,11 @@ public class TmClient {
                 String msg = e.getMessage() != null ? e.getMessage() : "";
                 boolean gateway = msg.contains("HTTP 502") || msg.contains("HTTP 503") || msg.contains("HTTP 504");
                 if (!gateway || attempt == GATEWAY_RETRY_MAX) {
+                    break;
+                }
+                int failures = consecutiveGatewayFailures.incrementAndGet();
+                if (failures >= GATEWAY_BREAKER_THRESHOLD) {
+                    log.warn("[TM] generatetoken — circuit breaker open after {} consecutive gateway errors, fail fast", failures);
                     break;
                 }
                 log.warn("[TM] generatetoken gateway error (attempt {}/{}), retrying in {}ms", attempt, GATEWAY_RETRY_MAX, GATEWAY_RETRY_INTERVAL_MS);
@@ -245,7 +260,9 @@ public class TmClient {
         IOException lastError = null;
         for (int attempt = 1; attempt <= GATEWAY_RETRY_MAX; attempt++) {
             try {
-                return sendOnce(method, path, queryParams, body);
+                JsonNode result = sendOnce(method, path, queryParams, body);
+                consecutiveGatewayFailures.set(0);
+                return result;
             } catch (NotLoginException e) {
                 // 多 TM 节点下 token 可能被某节点拒绝（刚扩容的节点元数据未同步等）— 强制刷新 token 重试
                 if (attempt == GATEWAY_RETRY_MAX) {
@@ -261,6 +278,15 @@ public class TmClient {
                     throw e;
                 }
                 lastError = e;
+                // 熔断：连续网关错误达到阈值 → TM 整体不可用（环境已被卸载/宕机），
+                // 不再逐请求耗尽重试。首个请求仍会走完一轮重试（60s），后续请求立即失败。
+                int failures = consecutiveGatewayFailures.incrementAndGet();
+                if (failures >= GATEWAY_BREAKER_THRESHOLD) {
+                    log.warn("[TM] {} {} → circuit breaker open after {} consecutive gateway errors, fail fast",
+                            method, path, failures);
+                    throw new GatewayException("TM gateway down — " + failures
+                            + " consecutive gateway errors (circuit breaker open): " + e.getMessage());
+                }
                 log.warn("[TM] {} {} → gateway error (attempt {}/{}), retrying in {}ms: {}",
                         method, path, attempt, GATEWAY_RETRY_MAX, GATEWAY_RETRY_INTERVAL_MS, e.getMessage());
                 Thread.sleep(GATEWAY_RETRY_INTERVAL_MS);

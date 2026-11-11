@@ -18,6 +18,7 @@ import java.util.Map;
  *   namespace: tapdata-xxx        # 必填
  *   helm_release: tapdata          # 可选
  *   delete_namespace: true         # 可选，默认 true
+ *   cancel_pending_cleanups: true  # 可选，默认 false — 卸载后取消挂起的 "tm" 清理钩子
  *   host: 113.98.206.142
  * </pre>
  */
@@ -67,6 +68,15 @@ public class UndeployTapdataAction extends BaseStep {
             k8s.exec("kubectl delete namespace " + p.getNamespace() + " --wait=true --timeout=120s");
             log.info("[undeploy] namespace deleted");
             outputs.put("namespaceDeleted", true);
+        }
+
+        // 3. 可选：取消挂起的 "tm" 清理钩子（资源在本环境的 TM 上，环境已卸载 → 清理无意义）
+        if (p.getCancelPendingCleanups() != null && p.getCancelPendingCleanups()) {
+            int cancelled = ctx.unregisterCleanups("tm");
+            if (cancelled > 0) {
+                log.info("[undeploy] cancelled {} pending 'tm' cleanup hook(s) — env already torn down", cancelled);
+                outputs.put("cancelledCleanupHooks", cancelled);
+            }
         }
 
         return success(outputs);

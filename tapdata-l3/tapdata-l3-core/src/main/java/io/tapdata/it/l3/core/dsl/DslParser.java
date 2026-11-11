@@ -106,26 +106,68 @@ public class DslParser {
      * 现在只做 per-file safe parse，每个文件独立 try-catch。
      */
     public List<ScenarioConfig> parseDirectorySafe(Path dir) {
-        List<ScenarioConfig> result = new ArrayList<>();
-        try (var stream = Files.list(dir)) {
-            List<Path> files = stream
-                    .filter(p -> p.toString().endsWith(".yaml") || p.toString().endsWith(".yml"))
-                    .sorted(Comparator.comparing(p -> p.getFileName().toString()))
-                    .toList();
-            if (files.isEmpty()) {
-                log.warn("[DSL] No .yaml/.yml files found in {}", dir);
-            }
-            for (Path f : files) {
-                try {
-                    result.add(parse(f));
-                } catch (DslParseException e) {
-                    log.warn("[DSL] Skipping {}: {}", f.getFileName(), e.getMessage());
-                }
-            }
-        } catch (IOException e) {
-            log.warn("[DSL] Failed to scan directory {}: {}", dir, e.getMessage());
+        return parseDirectoryDetailed(dir, false).scenarios();
+    }
+
+    /**
+     * Detailed safe parse — files that fail to parse are recorded (not silently dropped),
+     * duplicate case_ids are skipped, and subdirectories can be included.
+     * <p>
+     * Used by the CLI: {@code run} treats skipped files as warnings,
+     * {@code validate} treats them as errors (a skipped case silently reduces coverage).
+     *
+     * @param dir       directory containing .yaml/.yml case files
+     * @param recursive true → also scan subdirectories (sorted by relative path)
+     */
+    public ParseOutcome parseDirectoryDetailed(Path dir, boolean recursive) {
+        if (!Files.isDirectory(dir)) {
+            throw new DslParseException("Not a directory: " + dir);
         }
-        return result;
+        List<ScenarioConfig> scenarios = new ArrayList<>();
+        List<SkippedFile> skipped = new ArrayList<>();
+        Set<String> seenCaseIds = new HashSet<>();
+
+        List<Path> files;
+        try (var walk = recursive ? Files.walk(dir) : Files.list(dir)) {
+            files = walk
+                    .filter(p -> !p.equals(dir))
+                    .filter(Files::isRegularFile)
+                    .filter(p -> p.toString().endsWith(".yaml") || p.toString().endsWith(".yml"))
+                    .sorted(Comparator.comparing(p -> p.toString()))
+                    .toList();
+        } catch (IOException e) {
+            throw new DslParseException("Failed to scan directory: " + dir, e);
+        }
+        if (files.isEmpty()) {
+            log.warn("[DSL] No .yaml/.yml files found in {} (recursive={})", dir, recursive);
+        }
+        for (Path f : files) {
+            try {
+                ScenarioConfig scenario = parse(f);
+                if (!seenCaseIds.add(scenario.getCaseId())) {
+                    skipped.add(new SkippedFile(f, "duplicate case_id '" + scenario.getCaseId()
+                            + "' (first occurrence wins)"));
+                    log.warn("[DSL] Skipping {}: duplicate case_id '{}'", f, scenario.getCaseId());
+                    continue;
+                }
+                scenarios.add(scenario);
+            } catch (DslParseException e) {
+                skipped.add(new SkippedFile(f, e.getMessage()));
+                log.warn("[DSL] Skipping {}: {}", f.getFileName(), e.getMessage());
+            }
+        }
+        return new ParseOutcome(scenarios, skipped);
+    }
+
+    /** Result of {@link #parseDirectoryDetailed(Path, boolean)}. */
+    public record ParseOutcome(List<ScenarioConfig> scenarios, List<SkippedFile> skipped) {}
+
+    /** A .yaml file that was skipped during directory parsing, with the reason. */
+    public record SkippedFile(Path file, String reason) {
+        @Override
+        public String toString() {
+            return file.getFileName() + ": " + reason;
+        }
     }
 
     // ==================== Root parsing ====================
@@ -380,6 +422,13 @@ public class DslParser {
         Object keepAliveRaw = map.get("keep_alive");
         if (keepAliveRaw instanceof Boolean b) keepAlive = b;
 
+        // expect_failure — 负向用例：step 失败视为通过（可选 expect_failure_message 做子串断言）
+        boolean expectFailure = false;
+        Object expectFailureRaw = map.get("expect_failure");
+        if (expectFailureRaw instanceof Boolean eb) expectFailure = eb;
+        else if (expectFailureRaw != null) expectFailure = Boolean.parseBoolean(expectFailureRaw.toString());
+        String expectFailureMessage = optionalString(map, "expect_failure_message", null);
+
         // Lifecycle hooks — reserved for future execution engine
         @SuppressWarnings("unchecked")
         Map<String, Object> hooks = (Map<String, Object>) map.get("hooks");
@@ -422,6 +471,8 @@ public class DslParser {
                 .outputs(outputs)
                 .timeoutSeconds(timeoutSeconds)
                 .keepAlive(keepAlive)
+                .expectFailure(expectFailure)
+                .expectFailureMessage(expectFailureMessage)
                 .hooks(hooks)
                 .extraDeps(extraDeps)
                 .use(use)

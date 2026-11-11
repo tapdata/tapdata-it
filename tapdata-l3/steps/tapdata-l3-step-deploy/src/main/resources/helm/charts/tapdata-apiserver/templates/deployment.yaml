@@ -80,6 +80,11 @@ spec:
               value: "{{ .Values.env.licenseHost }}"
             - name: TAPDATA_WORK_DIR
               value: "/tapdata/apps"
+          # 启动探针 —— ApiServer 同样依赖 TM 可达 + Java 冷启动，慢启动不应被 liveness 误杀。
+          {{- if .Values.startupProbe.enabled }}
+          startupProbe:
+            {{- omit .Values.startupProbe "enabled" | toYaml | nindent 12 }}
+          {{- end }}
           livenessProbe:
             httpGet:
               path: /

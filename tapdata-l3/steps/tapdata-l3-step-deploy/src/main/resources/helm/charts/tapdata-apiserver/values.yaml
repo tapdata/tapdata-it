@@ -50,6 +50,17 @@ env:
 
 podAnnotations: {}
 
+# 启动探针 —— ApiServer Java 冷启动 + 等待 TM 可达，慢启动不应被 liveness 误杀。
+# 窗口 = periodSeconds × failureThreshold = 10s × 90 = 900s。
+startupProbe:
+  enabled: true
+  httpGet:
+    path: /
+    port: http
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 90
+
 podSecurityContext: {}
 
 securityContext: {}

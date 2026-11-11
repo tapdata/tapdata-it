@@ -75,6 +75,12 @@ spec:
               value: "{{ .Values.env.licenseHost }}"
             - name: TAPDATA_WORK_DIR
               value: "/tapdata/apps"
+          # 启动探针 —— Engine 需等 TM 就绪后再拉起 agent 进程，冷启动可能超过 liveness 窗口。
+          # 启动探针通过前 liveness 不生效，避免慢启动被 SIGKILL（Exit Code 137）。
+          {{- if .Values.startupProbe.enabled }}
+          startupProbe:
+            {{- omit .Values.startupProbe "enabled" | toYaml | nindent 12 }}
+          {{- end }}
           livenessProbe:
             exec:
               command:

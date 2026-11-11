@@ -53,6 +53,19 @@ env:
 
 podAnnotations: {}
 
+# 启动探针 —— 覆盖 TM Java 进程慢启动（首次部署可达 10 分钟以上）。
+# 启动探针成功前 livenessProbe 不会执行，避免慢启动被 SIGKILL（Exit Code 137 → crash-loop）。
+# 窗口 = periodSeconds × failureThreshold = 10s × 90 = 900s。
+# 同一处理器/阈值即可用于 server / engine / apiserver，按需调整。
+startupProbe:
+  enabled: true
+  httpGet:
+    path: /health
+    port: http
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 90
+
 podSecurityContext: {}
 
 securityContext: {}

@@ -50,6 +50,20 @@ public class DbforgeExecuteSqlAction extends BaseStep {
         return "dbforge_execute_sql";
     }
 
+    /**
+     * dbforge 建出来的库靠 JDBC 直连 — 驱动必须显式声明为 runtime deps
+     * （plugin jar 以 direct jar 方式加载，父 CL 不带这些驱动；POM 依赖不会自动进插件 CL）。
+     */
+    @Override
+    public List<String> getRuntimeDependencies() {
+        return List.of(
+                "mysql:mysql-connector-java:8.0.29",
+                "org.mariadb.jdbc:mariadb-java-client:3.3.3",
+                // 42.7.3 — PG14+ 默认 SCRAM-SHA-256 认证，42.1.4 不支持（authentication type 10）
+                "org.postgresql:postgresql:42.7.3",
+                "com.clickhouse:clickhouse-jdbc:0.4.6");
+    }
+
     @Override
     protected StepResult doExecute(StepConfig config, ScenarioContext ctx) throws Exception {
         DbforgeExecuteSqlParameter p = config.getInputParameterConfig(DbforgeExecuteSqlParameter.class);

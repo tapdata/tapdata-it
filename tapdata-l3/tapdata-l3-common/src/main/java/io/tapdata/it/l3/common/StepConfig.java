@@ -59,6 +59,15 @@ public class StepConfig {
     /** Optional cleanup hook: keep resources alive even if step succeeded (for debugging). */
     private boolean keepAlive;
 
+    /**
+     * expect_failure: true — 该 step 失败视为通过（用于负向用例，如验证超时被抛出、非法参数被拒绝）。
+     * 若 step 反而成功了，则整个 step 判失败。可选搭配 {@link #expectFailureMessage} 做消息子串断言。
+     */
+    private boolean expectFailure;
+
+    /** expect_failure 场景下可选的错误消息子串断言 — 实际错误消息必须包含该子串，否则仍判失败。 */
+    private String expectFailureMessage;
+
     /** Lifecycle hooks (beforeExecute / afterExecute / onError) — reserved for future use.
      *  Defined in design doc §4.5 DSL syntax table but execution engine not yet implemented. */
     private Map<String, Object> hooks;

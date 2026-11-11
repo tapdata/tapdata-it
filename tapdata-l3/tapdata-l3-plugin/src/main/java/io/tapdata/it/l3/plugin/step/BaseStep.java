@@ -75,6 +75,26 @@ public abstract class BaseStep implements ActionHandler {
     protected abstract StepResult doExecute(StepConfig config, ScenarioContext ctx) throws Exception;
 
     /**
+     * Effective timeout resolution: user {@code timeout_seconds} &gt; handler recommended
+     * ({@link #getRecommendedTimeoutSeconds}) &gt; framework default.
+     * A user timeout smaller than the handler's internal wait upper bound is auto-raised
+     * (with WARN) — otherwise the step would always die before the internal wait completes.
+     */
+    private int resolveTimeoutSeconds(StepConfig config) {
+        int user = config.getTimeoutSeconds();
+        int recommended = getRecommendedTimeoutSeconds(config);
+        if (user > 0 && recommended > 0 && user < recommended) {
+            log.warn("[BaseStep] '{}' ({}) timeout_seconds={}s < handler recommended {}s "
+                            + "(内部等待上限) — auto-raising to {}s to avoid false timeout failure",
+                    config.getId(), getActionName(), user, recommended, recommended);
+            return recommended;
+        }
+        if (user > 0) return user;
+        if (recommended > 0) return recommended;
+        return DEFAULT_TIMEOUT_SECONDS;
+    }
+
+    /**
      * Async wrapper — wraps doExecute() in CompletableFuture + orTimeout + lifecycle hooks.
      * <p>
      * DO NOT override this method in subclasses.
@@ -92,9 +112,7 @@ public abstract class BaseStep implements ActionHandler {
             }
         }
 
-        int timeoutSeconds = config.getTimeoutSeconds() > 0
-                ? config.getTimeoutSeconds()
-                : DEFAULT_TIMEOUT_SECONDS;
+        int timeoutSeconds = resolveTimeoutSeconds(config);
 
         log.debug("[BaseStep] '{}' ({}) starting with {}s timeout",
                 config.getId(), getActionName(), timeoutSeconds);

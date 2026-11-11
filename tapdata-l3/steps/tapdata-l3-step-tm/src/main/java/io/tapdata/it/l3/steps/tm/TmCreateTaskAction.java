@@ -167,7 +167,7 @@ public class TmCreateTaskAction extends BaseStep {
 
         // Auto-cleanup
         if (!config.isKeepAlive() && taskId != null) {
-            ctx.registerCleanup(() -> {
+            ctx.registerCleanup("tm", () -> {
                 try {
                     log.info("[TM] Auto-stopping & deleting task {}", taskId);
                     try {

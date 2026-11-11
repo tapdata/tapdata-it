@@ -102,19 +102,21 @@ public class ScenarioRunner {
         // 注入 3 处，方便不同访问模式:
         //  1. System.setProperty → ActionHandler 实现里 System.getProperty("TM_BASE_URL") 直接拿
         //  2. ctx.setVariable(k, v) → SpEL 里 #{ #variables['TM_BASE_URL'] }
-        //  3. ctx.setVariable("env", envMap) → SpEL 里 #{ #env['TM_BASE_URL'] }
-        Map<String, String> envMap = scenario.getEnv();
-        if (envMap != null && !envMap.isEmpty()) {
+        //  3. #env['TM_BASE_URL'] → SpEL context variable（ctx.setEnv → evaluator.registerEnv）
+        // 注意：单 JVM 批量跑多个场景时 System properties 是 JVM 全局的 —— 场景结束后必须恢复，
+        // 否则前一个场景的 env（如 HA 场景的 TM_BASE_URL=...193）会泄漏进后续场景。
+        Map<String, String> envMap = scenario.getEnv() == null ? Map.of() : scenario.getEnv();
+        Map<String, String> savedSystemProps = new java.util.HashMap<>();
+        if (!envMap.isEmpty()) {
             ConsoleUI.event("env", envMap.size() + " variable(s) loaded");
             envMap.forEach((k, v) -> {
-                // 不覆盖 JVM 启动时 -D 已传的 property（System.getProperty 优先）
-                if (System.getProperty(k) == null) {
-                    System.setProperty(k, v);
-                }
+                savedSystemProps.put(k, System.getProperty(k)); // null = 原本没有 → finally 里 clearProperty
+                System.setProperty(k, v); // 本场景 env 永远生效；JVM 启动 -D 的值在场景结束后恢复
                 ctx.setVariable(k, v);
             });
-            ctx.setVariable("env", new java.util.HashMap<>(envMap));
         }
+        // 始终注册 env（即使为空 map）→ #env['KEY'] 缺 key 时返回 null 而非 EL1007E
+        ctx.setEnv(envMap);
 
         // Merge user-declared variables (override env + built-ins if same key — variables 是场景私有临时变量)
         if (scenario.getVariables() != null) {
@@ -203,6 +205,14 @@ public class ScenarioRunner {
             return ScenarioResult.failed(scenario, unexpectedResult,
                     durationMs, startTime, Instant.now(), stepResults);
         } finally {
+            // 0. 恢复本场景覆盖过的 system properties —— 单 JVM 批跑跨场景隔离的关键
+            savedSystemProps.forEach((k, prev) -> {
+                if (prev == null) {
+                    System.clearProperty(k);
+                } else {
+                    System.setProperty(k, prev);
+                }
+            });
             // 1. ScenarioContext 里的 cleanup hooks（ctx.registerCleanup 注册的）
             transferContextCleanups(ctx);
             cleanupManager.triggerTeardown();
@@ -232,9 +242,9 @@ public class ScenarioRunner {
      * still runs hooks in reverse registration order.
      */
     private void transferContextCleanups(ScenarioContext ctx) {
-        Deque<Runnable> hooks = ctx.getCleanupStack();
+        Deque<ScenarioContext.CleanupEntry> hooks = ctx.getCleanupStack();
         while (!hooks.isEmpty()) {
-            cleanupManager.register(hooks.removeLast());
+            cleanupManager.register(hooks.removeLast().action());
         }
     }
 
@@ -607,6 +617,8 @@ public class ScenarioRunner {
                 .outputs((List<String>) substituteValue(step.getOutputs(), variables))
                 .timeoutSeconds(step.getTimeoutSeconds())
                 .keepAlive(step.isKeepAlive())
+                .expectFailure(step.isExpectFailure())
+                .expectFailureMessage(step.getExpectFailureMessage())
                 .hooks((Map<String, Object>) substituteValue(step.getHooks(), variables))
                 .extraDeps(step.getExtraDeps())
                 .use(step.getUse())

@@ -42,6 +42,20 @@ env:
 
 podAnnotations: {}
 
+# 启动探针 —— 确认 tapdata-agent.jar 进程已拉起后才允许 liveness 生效，
+# 避免 Engine 冷启动（需先等 TM 就绪）被 liveness 误杀。
+# 窗口 = periodSeconds × failureThreshold = 10s × 90 = 900s。
+startupProbe:
+  enabled: true
+  exec:
+    command:
+      - sh
+      - -c
+      - pgrep -f '/tapdata/apps/components/tapdata-agent.jar'
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 90
+
 podSecurityContext: {}
 
 securityContext: {}

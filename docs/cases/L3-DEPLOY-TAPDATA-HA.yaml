@@ -49,7 +49,8 @@ steps:
       license_host: "192.168.1.184:18080"
       license: "#{ #steps['fetch_license'].outputs['license'] }"
     outputs: [namespace, helmRelease]
-    timeout_seconds: 900
+    # helm --wait 最大 900s（chart startupProbe 窗口，TM 冷启动实测约 7~8 分钟），留出余量
+    timeout_seconds: 1500
 
   # ============================================================
   # 2. 断言：三个组件各 2 副本 Ready
@@ -137,11 +138,10 @@ steps:
       host: "localhost"
       namespace: "tapdata-ha"
       pod: "tapdata-tapdata-engine"
-      command: >-
-        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5
-        http://tapdata-server-svr.tapdata-ha.svc.cluster.local:3030/);
-        echo "http_code=$code"; test -n "$code" && test "$code" != "000"
-    timeout_seconds: 60
+      # TM 服务刚 Ready 时 Java 进程还要启动 1-2 分钟，curl 需要长轮询（24×5s ≈ 2min+）
+      # 注意：必须是单行命令 — YAML 折叠标量对更深缩进的行不折叠，多行 if/for 会被拆坏
+      command: 'for i in $(seq 1 24); do code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://tapdata-server-svr.tapdata-ha.svc.cluster.local:3030/); echo "try $i: http_code=$code"; if [ -n "$code" ] && [ "$code" != "000" ]; then exit 0; fi; sleep 5; done; echo "TM service not reachable after 24 tries"; exit 1'
+    timeout_seconds: 240
 
   # ============================================================
   # 3.5 License 校验：两个 TM Pod 均未发生过容器重启
