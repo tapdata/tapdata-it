@@ -384,9 +384,9 @@ public class SafeSpelEvaluator {
 }
 ```
 
-### 4.4 DSL 编写示例（含 parallel / foreach 语法）
+### 4.4 DSL 编写示例（含 parallel / for 语法）
 
-> **评审决议 P1-5**：DSL 增加 `parallel:` 分组和 `foreach:` 迭代语法。拓扑场景（一对多 / 多对一）由 `create_task` Step 的参数和 `parallel` 语法共同表达。
+> **评审决议 P1-5**：DSL 增加 `parallel:` 分组和 `for:` 迭代语法（草案中的 `foreach:` 已更名为 `for:`）。拓扑场景（一对多 / 多对一）由 `create_task` Step 的参数和 `parallel` 语法共同表达。
 
 ```yaml
 # L3-F-01: MySQL → PostgreSQL CDC 同步黄金路径
@@ -482,12 +482,12 @@ steps:
 
 
 # ============================================================
-# foreach 示例：一对多拓扑，3 个目标并行
+# for 示例：一对多拓扑，3 个目标并行
 # ============================================================
 steps:
   # ... 建库、建源数据源略 ...
 
-  - foreach:
+  - for:
       var: "sink_idx"
       items: [1, 2, 3]
       steps:
@@ -515,11 +515,17 @@ steps:
 | `scenario` | string | Scenario 名称（出现在报告和 CLI 输出中） |
 | `group` | enum | `functional` / `destructive` / `stability`，决定环境隔离级别 |
 | `variables` | map | 用户声明的 Scenario 级变量；内置 `timestamp` / `uuid` |
-| `steps` | array | Step 序列（顺序执行） |
+| `steps` | array | Step / 控制流块序列（顺序执行） |
 | `parallel` | block | **并行 Step 组——内部 Steps 必须是高度独立的（无状态、无交叉依赖）**，详见下方规则 |
-| `foreach` | block | 迭代器，内部 `steps` 按 `items` 重复执行，迭代变量注入 `${var}` |
+| `if` | block | 条件分支：`condition` 运行时求值，执行 `then` 或 `else`（`else` 可省略） |
+| `for` | block | 遍历集合：`var` + `items`（列表或 SpEL）+ `steps`，迭代变量支持 `${var}` 模板 |
+| `while` | block | 条件循环：每轮前重新求值 `condition`，`max_iterations` 防死循环（默认 1000） |
+| `switch` | block | 多路分支：`expression` 匹配 `cases`，未命中走 `default`（可省略） |
 | Step | object | 含 `id` / `action` / `inputs` / `outputs` / `hooks` / `timeout_seconds` |
 | SpEL 表达式 | `#{ ... }` | 用于引用变量和 Step 输出；**安全求值 + 空安全拦截**，禁止 `T()` / `new` / `invoke` |
+| 字符串模板 | `${var}` | 循环内替换 Step 的 `id` / `inputs` / `outputs` / `hooks`，用于生成唯一 Step id |
+
+> 控制流块（`if` / `for` / `while` / `switch`）支持任意互相嵌套；完整语法与样例见 [`tapdata-l3/README.md`](../tapdata-l3/README.md)。
 
 #### ⚠️ parallel 块的独立性硬规则
 

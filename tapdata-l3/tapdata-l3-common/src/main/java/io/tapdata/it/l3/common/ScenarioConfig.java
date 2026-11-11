@@ -15,8 +15,12 @@ import java.util.Map;
  * <ul>
  *   <li>a {@link StepConfig} — single sequential step</li>
  *   <li>a {@link ParallelBlock} — multiple steps run concurrently</li>
+ *   <li>an {@link IfBlock} — conditional branch ({@code if}/{@code then}/{@code else})</li>
+ *   <li>a {@link ForBlock} — loop over a collection ({@code for}/{@code var}/{@code items})</li>
+ *   <li>a {@link WhileBlock} — conditional loop ({@code while}/{@code condition})</li>
+ *   <li>a {@link SwitchBlock} — multi-way branch ({@code switch}/{@code cases}/{@code default})</li>
  * </ul>
- * Foreach (C2) and other control structures are added later as dedicated classes.
+ * Control-flow blocks nest recursively.
  */
 @Data
 @Builder
@@ -44,6 +48,6 @@ public class ScenarioConfig {
     /** User-declared variables — evaluated at scenario start, available in SpEL via #{ #variables['key'] }. */
     private Map<String, Object> variables;
 
-    /** Execution blocks — each is either StepConfig or ParallelBlock (C2 adds ForeachBlock). */
+    /** Execution blocks — each is StepConfig, ParallelBlock, IfBlock, ForBlock, WhileBlock or SwitchBlock. */
     private List<Object> blocks;
 }
