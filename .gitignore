@@ -11,3 +11,7 @@ __pycache__/
 # L3 deploy step：Helm 打包产物 & 本地临时 values
 tapdata-l3/steps/tapdata-l3-step-deploy/src/main/resources/helm/charts/*.tgz
 tapdata-l3/steps/tapdata-l3-step-deploy/src/main/resources/helm/values-*-tmp.yaml
+
+# L3 运行时生成的测试报告（report.html / test-report.json / junit-report.xml）
+reports/
+reports-*/
