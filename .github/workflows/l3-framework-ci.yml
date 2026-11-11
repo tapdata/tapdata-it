@@ -1,0 +1,269 @@
+# L3 Framework CI：校验 tapdata-l3 框架自身功能正确性
+#
+# 以「Docker 干净容器验证」为模版（fat jar + cases 挂载进容器，零预装依赖）：
+#   1. build  —— 构建 tapdata-l3-cli-fat.jar（唯一制品，内含 CLI + Core + 内置 step）
+#   2. verify —— 三个维度的框架功能校验：
+#      a) validate 正向：合法用例静态校验；外置 step（dbforge）从 Nexus 自动下载加载，
+#         使用全新空 m2 仓库，证明下载路径真实发生（而非本地缓存命中）
+#      b) validate 负向：非法 YAML（缺 action 字段）必须被拒绝，退出码非 0
+#      c) run 冒烟：干净容器中执行内置 step 用例（echo / parallel / timeout / expect_failure），
+#         不传 --remote-repos、不依赖 Nexus，验证 fat jar 自足性
+#   3. 报告上传 artifact（report.html / test-report.json / junit-report.xml）
+#
+# 运行环境：tapdata-it 自托管 runner（预装 JDK 17 = /usr/java/jdk-17.0.12、Maven，
+#           可达内网 Nexus https://nexus.tapdata.net；Docker 可选，缺失时回退直跑并告警）。
+#           可通过 workflow_dispatch 输入 runs_on 覆盖 runner label。
+#
+# 与 scripts/l3-remote.sh 的关系：l3-remote.sh 面向远程单机全量回归（含真实外部服务），
+# 本 CI 只做框架级校验（静态校验 + 内置 step 冒烟 + 外置 step 加载），不依赖任何外部测试环境。
+name: L3 Framework CI
+
+on:
+  push:
+    branches: ['main']
+    paths:
+      - 'tapdata-l3/**'
+      - 'docs/cases/**'
+      - '.github/workflows/l3-framework-ci.yml'
+  pull_request:
+    paths:
+      - 'tapdata-l3/**'
+      - 'docs/cases/**'
+      - '.github/workflows/l3-framework-ci.yml'
+  workflow_dispatch:
+    inputs:
+      runs_on:
+        description: 'Runner label（默认 tapdata-it 自托管）'
+        required: false
+        type: string
+        default: 'tapdata-it'
+
+concurrency:
+  group: l3-framework-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  REMOTE_NEXUS: https://nexus.tapdata.net
+
+jobs:
+  build:
+    name: Build fat jar
+    runs-on: ${{ inputs.runs_on || 'tapdata-it' }}
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # 自托管 runner 预装 JDK 17，不使用 setup-java 下载（与 connector-it-reusable 一致）
+      - name: Check JDK 17 and set JAVA_HOME
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -x /usr/java/jdk-17.0.12/bin/java ]] || { echo "::error::缺少 /usr/java/jdk-17.0.12/bin/java"; exit 1; }
+          echo "JAVA_HOME=/usr/java/jdk-17.0.12" >> "$GITHUB_ENV"
+          echo "/usr/java/jdk-17.0.12/bin" >> "$GITHUB_PATH"
+          java -version 2>&1 | head -3
+
+      # 只构建 CLI 反应堆（-am 带出 core/common/plugin）；
+      # step jar 不本地构建 —— verify 阶段从 Nexus 现场下载，这本身就是被校验的框架能力
+      - name: Build tapdata-l3-cli-fat.jar
+        uses: ./.github/actions/maven-retry
+        with:
+          args: |
+            -B
+            clean
+            install
+            -pl
+            tapdata-l3/tapdata-l3-cli
+            -am
+            -DskipTests
+            -Dmaven.javadoc.skip=true
+            -q
+
+      - name: Upload fat jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: tapdata-l3-cli-fat-${{ github.sha }}
+          path: tapdata-l3/tapdata-l3-cli/target/tapdata-l3-cli-fat.jar
+          if-no-files-found: error
+          retention-days: 7
+
+  verify:
+    name: Verify framework
+    needs: build
+    runs-on: ${{ inputs.runs_on || 'tapdata-it' }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Check JDK 17 and set JAVA_HOME
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -x /usr/java/jdk-17.0.12/bin/java ]] || { echo "::error::缺少 /usr/java/jdk-17.0.12/bin/java"; exit 1; }
+          echo "JAVA_HOME=/usr/java/jdk-17.0.12" >> "$GITHUB_ENV"
+          echo "/usr/java/jdk-17.0.12/bin" >> "$GITHUB_PATH"
+
+      - name: Download fat jar
+        uses: actions/download-artifact@v4
+        with:
+          name: tapdata-l3-cli-fat-${{ github.sha }}
+
+      # 组装最小校验集：正向 3 个（内置 echo / parallel / 外置 dbforge）+ 负向 1 个
+      - name: Stage verify workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ -f tapdata-l3-cli-fat.jar ]] || { echo "::error::fat jar artifact 缺失"; exit 1; }
+          mkdir -p ci-cases neg-cases
+          cp docs/cases/c1-smoke-test.yaml \
+             docs/cases/c2-parallel-test.yaml \
+             docs/cases/c3-dbforge-test.yaml ci-cases/
+          cp docs/cases/c1-invalid-test.yaml neg-cases/
+          ls -lh tapdata-l3-cli-fat.jar ci-cases neg-cases
+
+      # 选择执行方式：优先 Docker 干净容器（模版模式，--network host 直连内网 Nexus）；
+      # runner 无 Docker 时回退为直跑，并用全新 HOME 保证 m2 仓库为空
+      - name: Select execution mode
+        id: mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          if docker info >/dev/null 2>&1; then
+            echo "mode=docker" >> "$GITHUB_OUTPUT"
+            mkdir -p "$RUNNER_TEMP/l3-fresh-m2"
+            echo "执行方式：Docker 干净容器（eclipse-temurin:17-jre-alpine, --network host）"
+          else
+            echo "mode=jvm" >> "$GITHUB_OUTPUT"
+            echo "::warning::runner 无可用 Docker，回退为直跑（非干净容器环境）"
+            mkdir -p "$RUNNER_TEMP/l3-fresh-home"
+          fi
+
+      # ── a) validate 正向 ──────────────────────────────────────────────
+      # 全新空 m2 仓库 + --remote-repos：dbforge step jar 必须真实走「registry 查坐标 →
+      # Nexus 下载 → PluginCenter 注册 handler」链路；日志断言双重确认
+      - name: Validate cases (external step auto-download)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ steps.mode.outputs.mode }}" == "docker" ]]; then
+            docker run --rm --network host --user "$(id -u):$(id -g)" \
+              -v "$PWD":/workspace -w /workspace \
+              -v "$RUNNER_TEMP/l3-fresh-m2":/root/.m2 \
+              eclipse-temurin:17-jre-alpine \
+              java -jar tapdata-l3-cli-fat.jar validate \
+                --dir=ci-cases \
+                --remote-repos=$REMOTE_NEXUS 2>&1 | tee validate.log
+          else
+            HOME="$RUNNER_TEMP/l3-fresh-home" java -jar tapdata-l3-cli-fat.jar validate \
+              --dir=ci-cases \
+              --remote-repos=$REMOTE_NEXUS 2>&1 | tee validate.log
+          fi
+          grep -Eq 'Loaded [0-9]+ handler\(s\) from io\.tapdata\.it\.l3:tapdata-l3-step-dbforge' validate.log \
+            || { echo "::error::未观察到外置 step（dbforge）从 Nexus 自动下载加载"; exit 1; }
+          echo "正向校验通过：3 个场景静态校验 OK，外置 step 自动加载 OK"
+
+      # ── b) validate 负向 ──────────────────────────────────────────────
+      # 非法 YAML（缺 action 字段）必须导致非 0 退出码，否则说明 DSL 校验失效
+      - name: Validate invalid case must fail
+        shell: bash
+        run: |
+          set -euo pipefail
+          rc=0
+          if [[ "${{ steps.mode.outputs.mode }}" == "docker" ]]; then
+            docker run --rm --network host --user "$(id -u):$(id -g)" \
+              -v "$PWD":/workspace -w /workspace \
+              -v "$RUNNER_TEMP/l3-fresh-m2":/root/.m2 \
+              eclipse-temurin:17-jre-alpine \
+              java -jar tapdata-l3-cli-fat.jar validate \
+                --dir=neg-cases \
+                --remote-repos=$REMOTE_NEXUS 2>&1 | tee validate-negative.log || rc=$?
+          else
+            HOME="$RUNNER_TEMP/l3-fresh-home" java -jar tapdata-l3-cli-fat.jar validate \
+              --dir=neg-cases \
+              --remote-repos=$REMOTE_NEXUS 2>&1 | tee validate-negative.log || rc=$?
+          fi
+          if [[ $rc -eq 0 ]]; then
+            echo "::error::非法用例未被拒绝：validate 应返回非 0 退出码"
+            exit 1
+          fi
+          echo "负向校验通过：非法 YAML 被拒绝（exit=$rc）"
+
+      # ── c) run 冒烟（干净容器 / 全新 HOME，不依赖 Nexus）──────────────
+      # 内置 step（echo/sleep）+ parallel 块 + 超时 + expect_failure 负向用例；
+      # 不传 --remote-repos，验证 fat jar 在零外部依赖下自足运行
+      - name: Run built-in cases
+        shell: bash
+        run: |
+          set -euo pipefail
+          run_cases() {
+            local log="$1"; shift
+            if [[ "${{ steps.mode.outputs.mode }}" == "docker" ]]; then
+              docker run --rm --network host --user "$(id -u):$(id -g)" \
+                -v "$PWD":/workspace -w /workspace \
+                -v "$RUNNER_TEMP/l3-fresh-m2":/root/.m2 \
+                eclipse-temurin:17-jre-alpine \
+                java -jar tapdata-l3-cli-fat.jar run --dir=ci-cases "$@" 2>&1 | tee "$log"
+            else
+              HOME="$RUNNER_TEMP/l3-fresh-home" java -jar tapdata-l3-cli-fat.jar run \
+                --dir=ci-cases "$@" 2>&1 | tee "$log"
+            fi
+          }
+          run_cases run-smoke.log    --case-ids=L3-C1-SMOKE
+          run_cases run-parallel.log --case-ids=L3-C2-PARALLEL
+          grep -q '0 failed' run-smoke.log    || { echo "::error::smoke 用例存在失败"; exit 1; }
+          grep -q '0 failed' run-parallel.log || { echo "::error::parallel 用例存在失败"; exit 1; }
+          echo "冒烟通过：L3-C1-SMOKE / L3-C2-PARALLEL 全部 PASS"
+
+      - name: Check generated reports
+        shell: bash
+        run: |
+          set -euo pipefail
+          latest="$(ls -1dt reports/*/ | head -1)"
+          echo "报告目录: $latest"
+          for f in report.html test-report.json junit-report.xml; do
+            [[ -s "$latest/$f" ]] || { echo "::error::缺少报告文件 $f"; exit 1; }
+          done
+          echo "报告生成校验通过：report.html / test-report.json / junit-report.xml"
+
+      - name: Upload reports and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: l3-reports-${{ github.sha }}
+          path: |
+            reports/**
+            validate*.log
+            run-*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Summarize
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## L3 Framework CI"
+            echo ""
+            echo "- 事件: ${{ github.event_name }}"
+            if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+              echo "- PR: #${{ github.event.pull_request.number }}"
+            fi
+            echo "- Commit: \`${{ github.sha }}\`"
+            echo "- 执行方式: ${{ steps.mode.outputs.mode == 'docker' && 'Docker 干净容器' || '直跑（回退）' }}"
+            echo "- Nexus: \`$REMOTE_NEXUS\`"
+            echo ""
+            echo "| 校验项 | 内容 |"
+            echo "|---|---|"
+            echo "| validate 正向 | ci-cases 静态校验 + dbforge 外置 step 自动下载 |"
+            echo "| validate 负向 | 非法 YAML 必须拒绝 |"
+            echo "| run 冒烟 | L3-C1-SMOKE + L3-C2-PARALLEL（内置 step，无 Nexus） |"
+          } >> "$GITHUB_STEP_SUMMARY"
