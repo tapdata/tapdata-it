@@ -1,0 +1,402 @@
+case_id: "L3-F-02"
+scenario: "数据源管理端到端 — 新增 → 连接测试 → 被任务引用并成功同步"
+group: "functional"
+description: >-
+  L3 功能黄金路径（对应 wiki L3-F-02）：
+  (1) dbforge 创建 TapData MongoDB 中间库 + 部署 1 TM / 1 Engine / 1 ApiServer；
+  (2) dbforge 创建源/目标两个 MySQL，初始化源库 2 张表各 200 行；
+  (3) 通过 TM API 新增两个 MySQL 数据源（不指定 agent，由 TM 自动分配）；
+  (4) 调用连接测试接口，并查询数据源列表确认新增可见；
+  (5) 创建引用这两个数据源的任务 —— TM 建任务时会重新 schema 探测，
+      这是对「数据源可用性」最强的黑盒校验；
+  (6) 启动任务，等待全量+增量就绪，断言目标端全量数据正确；
+  (7) 源端写入增量，断言目标端行数收敛，证明两个数据源在真实同步链路上均可用；
+  (8) 收尾：卸载集群，释放全部 dbforge 租约。
+
+# 说明：
+# - tm_test_connection 是诊断型接口（失败不抛异常），真正的强校验发生在建任务 re-schema
+#   与数据实际落库阶段，故本用例用「任务跑通 + 增量收敛」作为最终断言。
+# - TM API 通过 kubectl patch svc → NodePort 30323 暴露。
+env:
+  TM_BASE_URL: "http://192.168.1.193:30323"
+
+steps:
+  # ============================================================
+  # 0. 申请 License
+  # ============================================================
+  - id: "fetch_license"
+    action: "get_license"
+    inputs:
+      base_url: "http://192.168.1.184:18080"
+      username: "license-temp"
+      password: "Gotapd8!"
+      customer: "tapdata-it"
+      reason: "L3 datasource management e2e test"
+      valid_days: 30
+      version: "4.23.0"
+      license_type: "OP"
+      engine_limit: 3
+    outputs: [license]
+    timeout_seconds: 60
+
+  # ============================================================
+  # 1. dbforge 创建 TapData MongoDB 中间库
+  # ============================================================
+  - id: "create_mongo"
+    action: "dbforge_create_database"
+    inputs:
+      db_type: "mongodb"
+      mode: "dedicated"
+      topology: "replicaset"
+    outputs: [lease_id, uri, host, internal_host, port, database, username, password]
+    timeout_seconds: 300
+
+  # ============================================================
+  # 2. 在租约 MongoDB 的 admin 库补建同名用户
+  # ============================================================
+  - id: "grant_mongo_admin_user"
+    action: "exec"
+    inputs:
+      host: "localhost"
+      namespace: "dbforge-env-ephemeral"
+      pod: "#{ #steps['create_mongo'].outputs['lease_id'] }-0"
+      container: "mongodb"
+      command: "mongosh -u \"$MONGODB_INITDB_ROOT_USERNAME\" -p \"$MONGODB_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --quiet --eval \"try { db.getSiblingDB('admin').createUser({user:'#{ #steps['create_mongo'].outputs['username'] }',pwd:'#{ #steps['create_mongo'].outputs['password'] }',roles:[{role:'dbOwner',db:'#{ #steps['create_mongo'].outputs['database'] }'}]}); print('GRANT_OK created'); } catch(e) { if (e.message.includes('already exists')) { print('GRANT_OK exists'); } else { throw e; } }\""
+      expect_stdout_contains: "GRANT_OK"
+    timeout_seconds: 60
+
+  # ============================================================
+  # 3. 部署 TapData：1 TM + 0 Engine + 1 ApiServer
+  # ============================================================
+  - id: "deploy_tapdata"
+    action: "deploy_tapdata"
+    inputs:
+      host: "localhost"
+      prebuilt_image: "192.168.1.184:5001/tapdata/tapdata-enterprise:latest"
+      harbor_registry: "192.168.1.184:5001"
+      mongodb_uri: "mongodb://#{ #steps['create_mongo'].outputs['username'] }:#{ #steps['create_mongo'].outputs['password'] }@#{ #steps['create_mongo'].outputs['internal_host'] }:#{ #steps['create_mongo'].outputs['port'] }/#{ #steps['create_mongo'].outputs['database'] }?authSource=admin"
+      mongodb_user: "#{ #steps['create_mongo'].outputs['username'] }"
+      mongodb_password: "#{ #steps['create_mongo'].outputs['password'] }"
+      mongodb_database: "#{ #steps['create_mongo'].outputs['database'] }"
+      mongodb_auth_source: "admin"
+      namespace: "tapdata-l3-f02"
+      server_replicas: 1
+      engine_replicas: 0
+      apiserver_replicas: 1
+      backend_url: "http://tapdata-server-svr.tapdata-l3-f02.svc.cluster.local:3030/api/"
+      license_host: "192.168.1.184:18080"
+      license: "#{ #steps['fetch_license'].outputs['license'] }"
+    outputs: [namespace, helmRelease]
+    timeout_seconds: 900
+
+  # ============================================================
+  # 4. 暴露 TM API → NodePort 30323
+  # ============================================================
+  - id: "expose_tm_nodeport"
+    action: "kubectl"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-l3-f02"
+      command: "patch svc tapdata-server-svr --type=merge -p '{\"spec\":{\"type\":\"NodePort\",\"ports\":[{\"port\":3030,\"targetPort\":3030,\"nodePort\":30323,\"protocol\":\"TCP\"}]}}'"
+      expect_stdout_contains: "patched"
+    timeout_seconds: 60
+
+  # ============================================================
+  # 5. 等待各组件就绪
+  # ============================================================
+  - id: "tm_replicas_1"
+    action: "kubectl"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-l3-f02"
+      command: "get deploy tapdata-tapdata-server -o jsonpath='{.status.readyReplicas}'"
+      expect_stdout_equals: "1"
+      max_attempts: 90
+      poll_interval_seconds: 5
+    timeout_seconds: 500
+
+  - id: "engine_replicas_0"
+    action: "kubectl"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-l3-f02"
+      command: "get deploy tapdata-tapdata-engine -o jsonpath='{.spec.replicas}'"
+      expect_stdout_equals: "0"
+      max_attempts: 60
+      poll_interval_seconds: 5
+    timeout_seconds: 400
+
+  - id: "apiserver_replicas_1"
+    action: "kubectl"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-l3-f02"
+      command: "get deploy tapdata-tapdata-apiserver -o jsonpath='{.status.readyReplicas}'"
+      expect_stdout_equals: "1"
+      max_attempts: 60
+      poll_interval_seconds: 5
+    timeout_seconds: 400
+
+  # ============================================================
+  # 6. 登录 TM
+  # ============================================================
+  - id: "login_tm"
+    action: "tm_login"
+    inputs:
+      wait_timeout_seconds: 300
+      poll_interval_ms: 5000
+    outputs: [access_token, tm_base_url]
+    timeout_seconds: 360
+
+  # ============================================================
+  # 7. 对齐 accessCode
+  # ============================================================
+  - id: "align_access_code"
+    action: "exec"
+    inputs:
+      host: "localhost"
+      namespace: "dbforge-env-ephemeral"
+      pod: "#{ #steps['create_mongo'].outputs['lease_id'] }-0"
+      container: "mongodb"
+      command: "mongosh -u \"$MONGODB_INITDB_ROOT_USERNAME\" -p \"$MONGODB_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin --quiet --eval \"var dbx=db.getSiblingDB('#{ #steps['create_mongo'].outputs['database'] }'); var done=0; ['User','users'].forEach(function(c){ if(done===0){ var col=dbx.getCollection(c); if(col.countDocuments({\\$or:[{accesscode:'<ACCESS_CODE>'},{accessCode:'<ACCESS_CODE>'}]})>0){ done=1; return; } var u=col.findOne({\\$or:[{accesscode:'3324cfdf-7d3e-4792-bd32-571638d4562f'},{accessCode:'3324cfdf-7d3e-4792-bd32-571638d4562f'}]}); if(u){ u._id=new ObjectId(); delete u.accessCode; u.accesscode='<ACCESS_CODE>'; u.email='admin-f02@tapdata.io'; if(u.username){ u.username='admin-f02'; } col.insertOne(u); done=1; } } }); print('ALIGN_OK inserted='+done);\""
+      expect_stdout_contains: "ALIGN_OK inserted=1"
+    timeout_seconds: 60
+
+  # ============================================================
+  # 8. 扩容 engine 到 1 副本
+  # ============================================================
+  - id: "scale_engine_to_1"
+    action: "kubectl"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-l3-f02"
+      command: "scale deploy tapdata-tapdata-engine --replicas=1"
+      expect_stdout_contains: "scaled"
+    timeout_seconds: 60
+
+  - id: "engine_ready_1"
+    action: "kubectl"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-l3-f02"
+      command: "get deploy tapdata-tapdata-engine -o jsonpath='{.status.readyReplicas}'"
+      expect_stdout_equals: "1"
+      max_attempts: 90
+      poll_interval_seconds: 5
+    timeout_seconds: 500
+
+  # ============================================================
+  # 9. 注册 connector
+  # ============================================================
+  - id: "deploy_connectors"
+    action: "exec"
+    inputs:
+      host: "localhost"
+      namespace: "tapdata-l3-f02"
+      pod: "tapdata-tapdata-engine"
+      command: "cd /tapdata/apps/lib && for j in /tapdata/apps/dist/*.jar; do echo \">> deploying $j\"; timeout 180 java \"-Dtapdata_proxy_mongodb_uri=mongodb://#{ #steps['create_mongo'].outputs['username'] }:#{ #steps['create_mongo'].outputs['password'] }@#{ #steps['create_mongo'].outputs['internal_host'] }:#{ #steps['create_mongo'].outputs['port'] }/#{ #steps['create_mongo'].outputs['database'] }?authSource=admin\" -jar pdk-deploy.jar register -a 3324cfdf-7d3e-4792-bd32-571638d4562f -t http://tapdata-server-svr.tapdata-l3-f02.svc.cluster.local:3030 \"$j\" 2>&1 | tail -5; done; curl -s -m 15 -o /dev/null -w \"init_http:%{http_code}\" http://tapdata-server-svr.tapdata-l3-f02.svc.cluster.local:3030/api/init; echo; echo DEPLOY_DONE"
+      expect_stdout_contains: "DEPLOY_DONE"
+    timeout_seconds: 620
+
+  # ============================================================
+  # 10. 并行创建源/目标 MySQL
+  # ============================================================
+  - parallel:
+      - id: "create_src_db"
+        action: "dbforge_create_database"
+        timeout_seconds: 300
+        inputs:
+          db_type: "mysql"
+          mode: "dedicated"
+          topology: "single"
+        outputs: [lease_id, db_name, host, internal_host, port, database, username, password, jdbc_url]
+
+      - id: "create_tgt_db"
+        action: "dbforge_create_database"
+        timeout_seconds: 300
+        inputs:
+          db_type: "mysql"
+          mode: "dedicated"
+          topology: "single"
+        outputs: [lease_id, db_name, host, internal_host, port, database, username, password, jdbc_url]
+
+  # ============================================================
+  # 11. 【核心】通过 TM API 新增两个数据源
+  # ============================================================
+  - id: "create_src_datasource"
+    action: "tm_create_datasource"
+    timeout_seconds: 360
+    inputs:
+      name: "L3_F02_SRC"
+      database_type: "Mysql"
+      connection_type: "source_and_target"
+      database_host: "#{ #steps['create_src_db'].outputs['internal_host'] }"
+      database_port: "#{ #steps['create_src_db'].outputs['port'] }"
+      database_username: "#{ #steps['create_src_db'].outputs['username'] }"
+      database_password: "#{ #steps['create_src_db'].outputs['password'] }"
+      database_name: "#{ #steps['create_src_db'].outputs['database'] }"
+    outputs: [connection_id]
+
+  - id: "create_tgt_datasource"
+    action: "tm_create_datasource"
+    timeout_seconds: 360
+    inputs:
+      name: "L3_F02_TGT"
+      database_type: "Mysql"
+      connection_type: "source_and_target"
+      database_host: "#{ #steps['create_tgt_db'].outputs['internal_host'] }"
+      database_port: "#{ #steps['create_tgt_db'].outputs['port'] }"
+      database_username: "#{ #steps['create_tgt_db'].outputs['username'] }"
+      database_password: "#{ #steps['create_tgt_db'].outputs['password'] }"
+      database_name: "#{ #steps['create_tgt_db'].outputs['database'] }"
+    outputs: [connection_id]
+
+  # ============================================================
+  # 12. 【核心】连接测试 + 列表中可见性
+  # ============================================================
+  - id: "test_connections"
+    action: "tm_test_connection"
+    timeout_seconds: 120
+    inputs:
+      connection_ids:
+        - "#{ #steps['create_src_datasource'].outputs['connection_id'] }"
+        - "#{ #steps['create_tgt_datasource'].outputs['connection_id'] }"
+      poll_interval_ms: 2000
+      wait_timeout_seconds: 60
+    outputs: [status, results]
+
+  - id: "list_datasources"
+    action: "tm_list_datasources"
+    timeout_seconds: 60
+    inputs:
+      database_type: "Mysql"
+      limit: 50
+    outputs: [total, connections]
+
+  # ============================================================
+  # 13. 初始化源库
+  # ============================================================
+  - id: "init_source"
+    action: "jdbc_init_source"
+    timeout_seconds: 180
+    extra_deps:
+      - "com.mysql:mysql-connector-j:8.3.0"
+    inputs:
+      jdbc_url: "#{ #steps['create_src_db'].outputs['jdbc_url'] }"
+      username: "#{ #steps['create_src_db'].outputs['username'] }"
+      password: "#{ #steps['create_src_db'].outputs['password'] }"
+      table_names: ["l3f02_orders", "l3f02_users"]
+      column_defs:
+        - { name: "name", type: "VARCHAR(100)" }
+        - { name: "amount", type: "BIGINT" }
+      rows_per_table: 200
+      drop_if_exists: true
+    outputs: [table_names, total_rows, tables_created]
+
+  # ============================================================
+  # 14. 【核心】任务引用这两个数据源（触发 re-schema，校验数据源真实可用）
+  # ============================================================
+  - id: "create_sync_task"
+    action: "tm_create_task"
+    keep_alive: false
+    timeout_seconds: 120
+    inputs:
+      name: "L3_F02_Datasource_E2E"
+      sync_type: "sync"
+      source_connection_id: "#{ #steps['create_src_datasource'].outputs['connection_id'] }"
+      target_connection_id: "#{ #steps['create_tgt_datasource'].outputs['connection_id'] }"
+      source_tables: "#{ #steps['init_source'].outputs['table_names'] }"
+    outputs: [task_id, sync_type]
+
+  - id: "start_sync_task"
+    action: "tm_start_task"
+    timeout_seconds: 60
+    inputs:
+      task_id: "#{ #steps['create_sync_task'].outputs['task_id'] }"
+
+  - id: "wait_cdc"
+    action: "tm_wait_task"
+    timeout_seconds: 700
+    inputs:
+      task_id: "#{ #steps['create_sync_task'].outputs['task_id'] }"
+      target_status: "complete"
+      poll_interval_ms: 5000
+      wait_timeout_seconds: 600
+    outputs: [final_status, reached_target]
+
+  # ============================================================
+  # 15. 断言全量数据落库
+  # ============================================================
+  - id: "wait_full_table0"
+    action: "assert_jdbc_data"
+    timeout_seconds: 240
+    inputs:
+      jdbc_url: "#{ #steps['create_tgt_db'].outputs['jdbc_url'] }"
+      username: "#{ #steps['create_tgt_db'].outputs['username'] }"
+      password: "#{ #steps['create_tgt_db'].outputs['password'] }"
+      sql: "SELECT COUNT(*) AS cnt FROM l3f02_orders"
+      assert_mode: "value_equals"
+      column: "cnt"
+      expected: 200
+      poll_interval: 5
+      max_attempts: 36
+
+  - id: "wait_full_table1"
+    action: "assert_jdbc_data"
+    timeout_seconds: 240
+    inputs:
+      jdbc_url: "#{ #steps['create_tgt_db'].outputs['jdbc_url'] }"
+      username: "#{ #steps['create_tgt_db'].outputs['username'] }"
+      password: "#{ #steps['create_tgt_db'].outputs['password'] }"
+      sql: "SELECT COUNT(*) AS cnt FROM l3f02_users"
+      assert_mode: "value_equals"
+      column: "cnt"
+      expected: 200
+      poll_interval: 5
+      max_attempts: 36
+
+  # ============================================================
+  # 16. 增量写入 + 断言收敛（证明数据源凭据在真实同步链路上有效）
+  # ============================================================
+  - id: "write_incremental"
+    action: "jdbc_write_incremental"
+    timeout_seconds: 120
+    extra_deps:
+      - "com.mysql:mysql-connector-j:8.3.0"
+    inputs:
+      jdbc_url: "#{ #steps['create_src_db'].outputs['jdbc_url'] }"
+      username: "#{ #steps['create_src_db'].outputs['username'] }"
+      password: "#{ #steps['create_src_db'].outputs['password'] }"
+      table_name: "l3f02_orders"
+      use_transaction: true
+      operation_counts:
+        insert: 10
+        update: 20
+        delete: 50
+    outputs: [total_operations, operations_insert, operations_update, operations_delete]
+
+  - id: "wait_incr_table0"
+    action: "assert_jdbc_data"
+    timeout_seconds: 240
+    inputs:
+      jdbc_url: "#{ #steps['create_tgt_db'].outputs['jdbc_url'] }"
+      username: "#{ #steps['create_tgt_db'].outputs['username'] }"
+      password: "#{ #steps['create_tgt_db'].outputs['password'] }"
+      sql: "SELECT COUNT(*) AS cnt FROM l3f02_orders"
+      assert_mode: "value_equals"
+      column: "cnt"
+      expected: 160
+      poll_interval: 5
+      max_attempts: 36
+
+  # ============================================================
+  # 17. 收尾：卸载 TapData 集群
+  # ============================================================
+  - id: "cleanup"
+    action: "undeploy_tapdata"
+    inputs:
+      namespace: "tapdata-l3-f02"
+      helm_release: "tapdata"
+      host: "localhost"
+      cancel_pending_cleanups: true
+    timeout_seconds: 300

@@ -72,14 +72,35 @@ public class TmAssertInspectResultAction extends BaseStep {
 
         JsonNode inspectInfo = client.get("/api/Inspects/find/" + inspectId);
 
-        // Parse result
-        JsonNode result = inspectInfo.has("inspectResult") ? inspectInfo.get("inspectResult") : inspectInfo;
+        // 结果落点有两种：
+        // 1) InspectDto.inspectResult — TM 真实结构，明细在 stats[]（每表一条，result=passed/failed）
+        //    汇总差异行数在 differenceNumber / difference_number
+        // 2) 平铺在 Inspect 文档上 — 旧结构，字段名 mismatchedRows / mismatchedTableCount
+        JsonNode result = inspectInfo.has("inspectResult") && inspectInfo.get("inspectResult").isObject()
+                ? inspectInfo.get("inspectResult") : inspectInfo;
 
         long mismatchedRows = 0;
         long totalRows = 0;
         int mismatchedTables = 0;
         int totalTables = 0;
 
+        // --- TM 真实结构：stats[] ---
+        JsonNode stats = result.get("stats");
+        if (stats != null && stats.isArray()) {
+            for (JsonNode s : stats) {
+                totalTables++;
+                if ("failed".equalsIgnoreCase(text(s, "result"))) mismatchedTables++;
+                mismatchedRows += longOf(s, "rowFailed", "row_failed");
+                totalRows += longOf(s, "sourceTotal", "source_total");
+            }
+        }
+
+        // --- 汇总差异行数：differenceNumber / difference_number ---
+        long differenceNumber = longOf(result, "differenceNumber", "difference_number");
+        if (differenceNumber == 0) differenceNumber = longOf(inspectInfo, "differenceNumber", "difference_number");
+        if (differenceNumber > mismatchedRows) mismatchedRows = differenceNumber;
+
+        // --- 旧结构兼容 ---
         if (result.has("mismatchedRows")) mismatchedRows = result.get("mismatchedRows").asLong();
         if (result.has("totalRows")) totalRows = result.get("totalRows").asLong();
         if (result.has("mismatchedTableCount")) mismatchedTables = result.get("mismatchedTableCount").asInt();
@@ -128,5 +149,13 @@ public class TmAssertInspectResultAction extends BaseStep {
 
     private static String text(JsonNode n, String key) {
         return n.has(key) && !n.get(key).isNull() ? n.get(key).asText() : null;
+    }
+
+    /** 按候选字段名依次取值（兼容 camelCase / snake_case），缺省 0。 */
+    private static long longOf(JsonNode n, String... keys) {
+        for (String key : keys) {
+            if (n.has(key) && !n.get(key).isNull()) return n.get(key).asLong();
+        }
+        return 0L;
     }
 }
