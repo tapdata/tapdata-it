@@ -20,14 +20,14 @@ data:
                 password: ""
                 mongoConnectionString: '{{ .Values.global.mongodb.hosts }}/{{ .Values.global.mongodb.database }}?authSource={{ .Values.global.mongodb.authSource }}'
                 sslPEMKeyFilePassword: U2FsdGVkX1+mndt/qnglPQ==
-                authenticationDatabase: admin
+                authenticationDatabase: '{{ .Values.global.mongodb.authSource }}'
     tapdata:
         metrics:
             enable: true
             enginePort: 3035
             agentPort: 3036
         cloud:
-            accessCode: '<ACCESS_CODE>'
+            accessCode: '3324cfdf-7d3e-4792-bd32-571638d4562f'
             retryTime: 3
             baseURLs: '{{ .Values.env.backendUrl }}'
         mode: cluster

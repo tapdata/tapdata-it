@@ -51,6 +51,12 @@ public class DeployTapdataParameter extends ParameterConfig {
     /** MongoDB 多副本 hosts（逗号分隔），不传则从 mongodbUri 推断。 */
     private String mongodbHosts;
 
+    /** TM 元数据库名 — 默认 tapdata。dbforge 租约场景需指定为租约 database（用户仅对该库有权限）。 */
+    private String mongodbDatabase = "tapdata";
+
+    /** MongoDB 认证库 — 默认 admin。dbforge 租约场景需指定为租约 database（用户创建在该库下）。 */
+    private String mongodbAuthSource = "admin";
+
     /** tapdata-server 副本数 — 默认 1。 */
     private Integer serverReplicas = 1;
 

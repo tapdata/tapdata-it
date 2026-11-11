@@ -27,6 +27,14 @@
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
         </dependency>
+        <!-- MySQL 驱动：jdbc_init_source / jdbc_write_incremental 直接以
+             com.mysql.cj.jdbc.Driver 连源/目标库，必须随插件分发，
+             否则远程 runner 上 ClassNotFoundException -->
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <version>8.3.0</version>
+        </dependency>
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>

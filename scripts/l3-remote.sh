@@ -62,9 +62,10 @@ done
          "$HOME/.m2/repository/io/tapdata/it/l3/tapdata-l3-step-jdbc" \
          "$HOME/.m2/repository/io/tapdata/it/l3/tapdata-l3-plugin" \
          "$HOME/.m2/repository/io/tapdata/it/l3/tapdata-l3-core" \
+         "$HOME/.m2/repository/io/tapdata/it/l3/tapdata-l3-step-assert-jdbc" \
          "$HOME/.m2/repository/io/tapdata/it/l3/tapdata-l3-common"
   mvn clean install -DskipTests \
-      -pl tapdata-l3/steps/tapdata-l3-step-tm,tapdata-l3/steps/tapdata-l3-step-dbforge,tapdata-l3/steps/tapdata-l3-step-jdbc,tapdata-l3/tapdata-l3-plugin,tapdata-l3/tapdata-l3-cli \
+      -pl tapdata-l3/steps/tapdata-l3-step-tm,tapdata-l3/steps/tapdata-l3-step-dbforge,tapdata-l3/steps/tapdata-l3-step-jdbc,tapdata-l3/steps/tapdata-l3-step-assert-jdbc,tapdata-l3/tapdata-l3-plugin,tapdata-l3/tapdata-l3-cli \
       -am -q
   info "Build OK — fat jar: $(ls -lh "$FAT_JAR" | awk '{print $5}')"
 }

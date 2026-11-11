@@ -135,8 +135,14 @@ public abstract class BaseStep implements ActionHandler {
 
             try {
                 result = future.orTimeout(timeoutSeconds, TimeUnit.SECONDS).join();
-                // 3a. 成功返回 — 自动注册 outputs
-                if (result != null && result.getOutputs() != null) {
+                // 3a. doExecute 返回 failure(...) 同样视为失败 —— 否则 StepRunner 会把
+                //     未抛异常的 failure 结果当成 SUCCESS（exitCode/断言失败被静默吞掉）
+                if (result != null && !result.isSuccess()) {
+                    executeErr = result.getError() != null
+                            ? result.getError()
+                            : new RuntimeException("Step '" + config.getId() + "' returned failure result");
+                } else if (result != null && result.getOutputs() != null) {
+                    // 成功返回 — 自动注册 outputs
                     for (Map.Entry<String, Object> entry : result.getOutputs().entrySet()) {
                         if (entry.getKey() != null && entry.getValue() != null) {
                             ctx.setStepOutput(config.getId(), entry.getKey(), entry.getValue());

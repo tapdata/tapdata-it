@@ -81,10 +81,10 @@ spec:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: 90
+            initialDelaySeconds: 300
             periodSeconds: 15
             timeoutSeconds: 5
-            failureThreshold: 3
+            failureThreshold: 8
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:

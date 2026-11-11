@@ -161,12 +161,12 @@ public class DeployTapdataAction extends BaseStep {
         k8s.scpTo(tmpValues.getAbsolutePath(), REMOTE_VALUES);
         tmpValues.delete();
 
-        // ---- 9. helm install ----
+        // ---- 9. helm upgrade --install（幂等：首次安装 / 重跑升级均可，values 变化触发滚动更新）----
         String helmInstall = String.format(
-                "helm install %s %s -n %s --create-namespace " +
+                "helm upgrade --install %s %s -n %s --create-namespace " +
                         "--wait --timeout 600s -f %s",
                 helmRelease, REMOTE_CHART, namespace, REMOTE_VALUES);
-        k8s.exec(helmInstall, 600_000L).assertSuccess("helm install " + helmRelease);
+        k8s.exec(helmInstall, 600_000L).assertSuccess("helm upgrade --install " + helmRelease);
 
         // ---- 10. 等待所有 TapData Pod ready ----
         K8sClient.ExecResult pods = k8s.exec(
@@ -403,8 +403,8 @@ public class DeployTapdataAction extends BaseStep {
         sb.append("    protocol: mongodb\n");
         sb.append("    user: \"").append(nullSafe(p.getMongodbUser())).append("\"\n");
         sb.append("    password: \"").append(nullSafe(p.getMongodbPassword())).append("\"\n");
-        sb.append("    authSource: admin\n");
-        sb.append("    database: tapdata\n");
+        sb.append("    authSource: ").append(nullSafe(p.getMongodbAuthSource())).append("\n");
+        sb.append("    database: ").append(nullSafe(p.getMongodbDatabase())).append("\n");
         if (p.getMongodbHosts() != null && !p.getMongodbHosts().isBlank()) {
             sb.append("    hosts: \"").append(p.getMongodbHosts()).append("\"\n");
         } else {

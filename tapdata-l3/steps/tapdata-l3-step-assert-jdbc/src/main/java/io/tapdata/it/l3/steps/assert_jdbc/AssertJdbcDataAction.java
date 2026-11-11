@@ -170,7 +170,11 @@ public class AssertJdbcDataAction extends BaseStep {
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
                 List<Map<String, Object>> rows = executeQuery(p.getJdbcUrl(), p.getUsername(), p.getPassword(), p.getSql());
-                evaluateAssertion(assertMode, rows, expectedCount, expectedMin, expectedValue, column);
+                // Integer → int 拆箱保护：缺省传 -1，由 evaluateAssertion 内部按 mode 校验 "required"
+                evaluateAssertion(assertMode, rows,
+                        expectedCount != null ? expectedCount : -1,
+                        expectedMin != null ? expectedMin : -1,
+                        expectedValue, column);
 
                 long elapsedMs = System.currentTimeMillis() - t0;
                 log.info("[AssertJDBC] PASSED after {} attempt(s) ({}ms)", attempt, elapsedMs);
