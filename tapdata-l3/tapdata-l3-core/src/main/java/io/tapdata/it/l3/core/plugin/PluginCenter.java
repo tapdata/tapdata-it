@@ -585,7 +585,12 @@ public class PluginCenter {
 
         // 4. 替换：更新 classLoaders 映射，关闭旧 CL（如果有）
         classLoaders.put(actionName, newCL);
+        // 同步更新 coordinateCache 中指向旧 CL 的条目 —— 否则后续 getOrLoadAction→loadPlugin
+        // 命中 coordinateCache 时会拿旧 CL（裸插件 jar，无 deps，且已被 close）重新注册 handler，
+        // 把 registry 覆盖回无依赖版本，执行时 ClassNotFoundException（如 mysql 驱动）。
+        // 同一 coordinate 的多个 action 共享同一 CL，统一指向新 CL（URL 超集，安全）。
         if (oldCL != null) {
+            coordinateCache.replaceAll((coord, cl) -> cl == oldCL ? newCL : cl);
             try { oldCL.close(); } catch (Exception ignored) { /* Java 模块系统可能拒绝 */ }
         }
 

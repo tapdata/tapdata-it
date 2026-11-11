@@ -58,7 +58,11 @@ public class ExecAction extends BaseStep {
         }
         cmd.append(" -- sh -c ").append(quote(p.getCommand()));
 
-        K8sClient.ExecResult r = k8s.exec(cmd.toString(), 120_000L);
+        // 进程级超时跟随 step timeout_seconds（留 10s 余量），兜底 120s —
+        // 之前硬编码 120s 会在长命令（如 connector 注册）还没跑完时被强杀。
+        long procTimeoutMs = Math.max(120_000L,
+                config.getTimeoutSeconds() > 0 ? config.getTimeoutSeconds() * 1000L - 10_000L : 120_000L);
+        K8sClient.ExecResult r = k8s.exec(cmd.toString(), procTimeoutMs);
 
         Map<String, Object> outputs = new LinkedHashMap<>();
         outputs.put("stdout", r.stdout);
@@ -80,27 +84,36 @@ public class ExecAction extends BaseStep {
     }
 
     /**
-     * 支持 pod 名前缀匹配：如果传入的 pod 不是精确匹配（不含 '-' 或不以数字结尾），
-     * 先 kubectl get pods 找名字以它开头的第一个 Running Pod。
+     * 解析 pod 名：总是先列出 Pod —— 精确匹配优先（任意 phase，兼容 StatefulSet
+     * 的 lease-xxx-0 形式），否则取第一个以它为前缀的 Running Pod。
+     * 不再用正则猜 "是否已是完整 pod 名"（`-engine` 这类后缀会被误判成 pod hash）。
      */
     private String resolvePodName(K8sClient k8s, String namespace, String podArg) {
-        if (podArg.matches(".+-\\d+$") || podArg.matches(".+-[a-z0-9]{5,}")) {
-            // 看起来已经是完整 pod 名
-            return podArg;
-        }
         K8sClient.ExecResult r = k8s.exec(
-                "kubectl get pods -n " + namespace + " --field-selector=status.phase=Running " +
-                "-o jsonpath='{range .items[*]}{.metadata.name}{\"\\n\"}{end}'");
+                "kubectl get pods -n " + namespace + " " +
+                "-o jsonpath='{range .items[*]}{.metadata.name}{\" \"}{.status.phase}{\"\\n\"}{end}'");
         if (!r.isSuccess()) {
             throw new RuntimeException("kubectl get pods failed: " + r.stderr);
         }
+        String runningPrefix = null;
+        StringBuilder available = new StringBuilder();
         for (String line : r.stdout.split("\n")) {
             String trimmed = line.trim();
-            if (trimmed.startsWith(podArg)) {
-                return trimmed;
+            if (trimmed.isEmpty()) continue;
+            available.append(trimmed).append("; ");
+            String name = trimmed.split("\\s+")[0];
+            if (name.equals(podArg)) {
+                return name; // 精确匹配 — 直接使用（包括非 Running，错误留给 kubectl exec 报）
+            }
+            if (runningPrefix == null && name.startsWith(podArg) && trimmed.endsWith("Running")) {
+                runningPrefix = name;
             }
         }
-        throw new RuntimeException("No Running pod found with prefix '" + podArg + "' in namespace " + namespace);
+        if (runningPrefix != null) {
+            return runningPrefix;
+        }
+        throw new RuntimeException("No pod found matching '" + podArg + "' in namespace " + namespace
+                + ". Available: " + available);
     }
 
     /** 用单引号包住命令，内部单引号替换为 '\'' 以便远端 bash 正确解析。 */

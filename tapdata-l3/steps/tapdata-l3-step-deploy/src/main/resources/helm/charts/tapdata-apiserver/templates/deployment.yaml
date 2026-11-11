@@ -66,6 +66,10 @@ spec:
               value: "{{ .Values.env.module }}"
             - name: MONGODB_CONNECTION_STRING
               value: "{{ .Values.global.mongodb.hosts }}/{{ .Values.global.mongodb.database }}?authSource={{ .Values.global.mongodb.authSource }}"
+            - name: MONGODB_USER
+              value: "{{ .Values.global.mongodb.user }}"
+            - name: MONGODB_PASSWORD
+              value: "{{ .Values.global.mongodb.password }}"
             - name: BACKENDURL
               value: "{{ .Values.env.backendUrl }}"
             - name: JAVA_VERSION
@@ -80,10 +84,10 @@ spec:
             httpGet:
               path: /
               port: http
-            initialDelaySeconds: 60
+            initialDelaySeconds: 240
             periodSeconds: 15
             timeoutSeconds: 5
-            failureThreshold: 3
+            failureThreshold: 8
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:

@@ -61,9 +61,13 @@ public class TmGetTaskAction extends BaseStep {
         outputs.put("current_step", text(task, "currentStep"));
         outputs.put("source_connection_id", text(task, "sourceConnectionId"));
         outputs.put("target_connection_id", text(task, "targetConnectionId"));
+        // 当前运行该任务的 engine (worker process_id) + 任务心跳时间戳 — HA 故障转移场景使用
+        outputs.put("agent_id", text(task, "agentId"));
+        outputs.put("ping_time", task.has("pingTime") && !task.get("pingTime").isNull()
+                ? task.get("pingTime").asLong() : null);
 
-        log.info("[TM] Task {}: name={}, status={}, type={}", p.getTaskId(),
-                outputs.get("name"), outputs.get("status"), outputs.get("type"));
+        log.info("[TM] Task {}: name={}, status={}, type={}, agentId={}", p.getTaskId(),
+                outputs.get("name"), outputs.get("status"), outputs.get("type"), outputs.get("agent_id"));
         return success(outputs);
     }
 
