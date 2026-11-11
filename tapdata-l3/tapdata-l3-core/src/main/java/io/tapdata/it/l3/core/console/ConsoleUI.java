@@ -1,6 +1,6 @@
 package io.tapdata.it.l3.core.console;
 
-import io.tapdata.it.l3.common.ParallelBlock;
+import io.tapdata.it.l3.common.ScenarioBlocks;
 import io.tapdata.it.l3.common.ScenarioConfig;
 import io.tapdata.it.l3.common.StepConfig;
 import io.tapdata.it.l3.core.result.ScenarioResult;
@@ -61,8 +61,11 @@ public final class ConsoleUI {
     }
 
     public static void scenarioEnd(ScenarioResult result) {
-        int totalSteps = result.getScenario() == null ? 0 : countSteps(result.getScenario());
         int executed = result.getSteps() == null ? 0 : result.getSteps().size();
+        // 控制流（if/for/switch）的实际执行步数可能超过静态估算，取二者最大值避免出现 3/1
+        int totalSteps = result.getScenario() == null
+                ? executed
+                : Math.max(countSteps(result.getScenario()), executed);
         String status = result.isSuccess() ? color(GREEN + BOLD, "PASSED") : color(RED + BOLD, "FAILED");
         println("      " + status
                 + "  |  steps " + executed + "/" + totalSteps
@@ -184,12 +187,7 @@ public final class ConsoleUI {
 
     private static int countSteps(ScenarioConfig scenario) {
         if (scenario == null || scenario.getBlocks() == null) return 0;
-        int count = 0;
-        for (Object block : scenario.getBlocks()) {
-            if (block instanceof StepConfig) count++;
-            else if (block instanceof ParallelBlock parallel) count += parallel.getSteps().size();
-        }
-        return count;
+        return ScenarioBlocks.countSteps(scenario.getBlocks());
     }
 
     private static String color(String code, String text) {

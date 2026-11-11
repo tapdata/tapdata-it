@@ -48,6 +48,14 @@ public class ScenarioContext {
         return variables.get(name);
     }
 
+    public boolean hasVariable(String name) {
+        return variables.containsKey(name);
+    }
+
+    public void removeVariable(String name) {
+        variables.remove(name);
+    }
+
     public Map<String, Object> getVariables() {
         return java.util.Collections.unmodifiableMap(variables);
     }
@@ -105,8 +113,15 @@ public class ScenarioContext {
         return result;
     }
 
+    /**
+     * Recursively evaluate SpEL expressions inside any value (String / Map / List).
+     * Non-expression values are returned unchanged.
+     * <p>
+     * Exposed so control-flow blocks ({@code if} / {@code for} / {@code switch}) can
+     * evaluate their conditions and iteration sources with the same semantics as step inputs.
+     */
     @SuppressWarnings("unchecked")
-    private Object evaluateValue(Object value) {
+    public Object evaluateValue(Object value) {
         if (value == null) return null;
         if (value instanceof String) {
             String s = (String) value;
