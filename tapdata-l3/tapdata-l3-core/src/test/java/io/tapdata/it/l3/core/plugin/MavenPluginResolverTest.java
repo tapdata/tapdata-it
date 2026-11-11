@@ -6,10 +6,14 @@ import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Set;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -251,6 +255,135 @@ class MavenPluginResolverTest {
         void blankNexusUrlTreatedAsNull(@TempDir Path tempRepo) {
             // 空列表也应该走默认 Central 兜底
             assertDoesNotThrow(() -> new MavenPluginResolver(tempRepo.toString(), List.of()));
+        }
+    }
+
+    // ==================== 传递依赖解析（file: 仓库，完全离线） ====================
+
+    @Nested
+    @DisplayName("resolveWithDependencies — 传递依赖")
+    class TransitiveResolution {
+
+        @TempDir
+        Path tmp;
+
+        @Test
+        @DisplayName("递归加载 root → mid → leaf 三级依赖")
+        void resolvesTransitiveDependenciesRecursively() throws Exception {
+            Path repo = tmp.resolve("remote-repo");
+            install(repo, "leaf", "1.0", List.of());
+            install(repo, "mid", "1.0", List.of("io.tapdata.it.test:leaf:1.0"));
+            install(repo, "root", "1.0", List.of("io.tapdata.it.test:mid:1.0"));
+
+            MavenPluginResolver resolver = newResolver(repo, "local-repo");
+            try {
+                List<String> names = resolver.resolveWithDependencies("io.tapdata.it.test:root:1.0")
+                        .stream().map(p -> p.getFileName().toString()).sorted().toList();
+
+                assertEquals(List.of("leaf-1.0.jar", "mid-1.0.jar", "root-1.0.jar"), names);
+            } finally {
+                resolver.shutdown();
+            }
+        }
+
+        @Test
+        @DisplayName("optional 依赖不被遍历（线上 collect 超时的根因）")
+        void skipsOptionalDependencies() throws Exception {
+            Path repo = tmp.resolve("remote-repo-optional");
+            install(repo, "leaf", "1.0", List.of());
+            install(repo, "app", "1.0", List.of("io.tapdata.it.test:leaf:1.0"), true);
+
+            MavenPluginResolver resolver = newResolver(repo, "local-repo-optional");
+            try {
+                List<String> names = resolver.resolveWithDependencies("io.tapdata.it.test:app:1.0")
+                        .stream().map(p -> p.getFileName().toString()).sorted().toList();
+
+                assertEquals(List.of("app-1.0.jar"), names);
+            } finally {
+                resolver.shutdown();
+            }
+        }
+
+        @Test
+        @DisplayName("无传递依赖的 artifact 只返回自身 jar")
+        void resolvesStandaloneArtifact() throws Exception {
+            Path repo = tmp.resolve("remote-repo-standalone");
+            install(repo, "solo", "2.0", List.of());
+
+            MavenPluginResolver resolver = newResolver(repo, "local-repo-standalone");
+            try {
+                List<Path> jars = resolver.resolveWithDependencies("io.tapdata.it.test:solo:2.0");
+
+                assertEquals(1, jars.size());
+                assertEquals("solo-2.0.jar", jars.get(0).getFileName().toString());
+                assertTrue(Files.isRegularFile(jars.get(0)));
+            } finally {
+                resolver.shutdown();
+            }
+        }
+
+        private MavenPluginResolver newResolver(Path remoteRepo, String localRepoDir) {
+            return new MavenPluginResolver(
+                    tmp.resolve(localRepoDir).toString(),
+                    List.of(remoteRepo.toUri().toString()),
+                    2,
+                    ProxyConfig.none());
+        }
+
+        /**
+         * 在 file 仓库里安装一个 artifact（jar + pom）。
+         *
+         * @param deps 形如 {@code group:artifact:version} 的 compile 依赖
+         */
+        private void install(Path repo, String artifactId, String version,
+                             List<String> deps) throws IOException {
+            install(repo, artifactId, version, deps, false);
+        }
+
+        private void install(Path repo, String artifactId, String version,
+                             List<String> deps, boolean optional) throws IOException {
+            String groupId = "io.tapdata.it.test";
+            Path dir = repo.resolve(groupId.replace('.', '/'))
+                    .resolve(artifactId).resolve(version);
+            Files.createDirectories(dir);
+
+            writeJar(dir.resolve(artifactId + "-" + version + ".jar"));
+
+            StringBuilder pom = new StringBuilder()
+                    .append("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+                    .append("<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n")
+                    .append("  <modelVersion>4.0.0</modelVersion>\n")
+                    .append("  <groupId>").append(groupId).append("</groupId>\n")
+                    .append("  <artifactId>").append(artifactId).append("</artifactId>\n")
+                    .append("  <version>").append(version).append("</version>\n");
+            if (!deps.isEmpty()) {
+                pom.append("  <dependencies>\n");
+                for (String dep : deps) {
+                    String[] parts = dep.split(":");
+                    pom.append("    <dependency>\n")
+                            .append("      <groupId>").append(parts[0]).append("</groupId>\n")
+                            .append("      <artifactId>").append(parts[1]).append("</artifactId>\n")
+                            .append("      <version>").append(parts[2]).append("</version>\n");
+                    if (optional) {
+                        pom.append("      <optional>true</optional>\n");
+                    }
+                    pom.append("    </dependency>\n");
+                }
+                pom.append("  </dependencies>\n");
+            }
+            pom.append("</project>\n");
+
+            Files.writeString(dir.resolve(artifactId + "-" + version + ".pom"), pom.toString(),
+                    StandardCharsets.UTF_8);
+        }
+
+        private void writeJar(Path jar) throws IOException {
+            try (OutputStream out = Files.newOutputStream(jar);
+                 ZipOutputStream zip = new ZipOutputStream(out)) {
+                zip.putNextEntry(new ZipEntry("META-INF/MANIFEST.MF"));
+                zip.write("Manifest-Version: 1.0\n".getBytes(StandardCharsets.UTF_8));
+                zip.closeEntry();
+            }
         }
     }
 }
