@@ -168,6 +168,15 @@ class MainTest(unittest.TestCase):
         self.assertEqual(["connectors/mysql"], json.loads(result["connectors"]))
         self.assertEqual([], self.calls)
 
+    def test_service_exclusions_apply_to_override_and_fallback(self):
+        result = self.run_main(CONNECTORS_OVERRIDE="connectors/csv,connectors/mysql",
+                               EXCLUDED_CONNECTORS="connectors/mysql")
+        self.assertEqual(["connectors/csv"], json.loads(result["connectors"]))
+        self.fail_diff = True
+        result = self.run_main(EXCLUDED_CONNECTORS="connectors/csv,connectors/mysql")
+        self.assertEqual([], json.loads(result["connectors"]))
+        self.assertEqual("false", result["has_changes"])
+
     def test_missing_push_baseline_is_fetched_before_diff(self):
         self.missing_base = True
         result = self.run_main()
