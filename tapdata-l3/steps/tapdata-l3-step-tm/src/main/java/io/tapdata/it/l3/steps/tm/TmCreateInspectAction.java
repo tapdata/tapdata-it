@@ -197,7 +197,7 @@ public class TmCreateInspectAction extends BaseStep {
                         p.getTaskId(), srcNodeId, tgtNodeId,
                         srcConnId, tgtConnId, srcConnName, tgtConnName,
                         table, table,
-                        srcDbType, tgtDbType);
+                        srcDbType, tgtDbType, sortColumn(p));
                 result.add(inspectTask);
             }
         } else {
@@ -206,7 +206,7 @@ public class TmCreateInspectAction extends BaseStep {
                     p.getTaskId(), srcNodeId, tgtNodeId,
                     srcConnId, tgtConnId, srcConnName, tgtConnName,
                     srcTable, tgtTable,
-                    srcDbType, tgtDbType);
+                    srcDbType, tgtDbType, sortColumn(p));
             result.add(inspectTask);
         }
 
@@ -219,7 +219,8 @@ public class TmCreateInspectAction extends BaseStep {
             String srcNodeId, String tgtNodeId,
             String srcConnId, String tgtConnId, String srcConnName, String tgtConnName,
             String srcTable, String tgtTable,
-            String srcDbType, String tgtDbType) {
+            String srcDbType, String tgtDbType,
+            String sortColumn) {
 
         Map<String, Object> source = new LinkedHashMap<>();
         source.put("connectionId", srcConnId);
@@ -228,7 +229,7 @@ public class TmCreateInspectAction extends BaseStep {
         source.put("nodeName", srcTable);
         source.put("table", srcTable);
         if (srcDbType != null) source.put("databaseType", srcDbType);
-        source.put("sortColumn", "_id");
+        source.put("sortColumn", sortColumn);
         source.put("inspectDataSource", true);
         source.put("fields", new ArrayList<>());
         source.put("isFilter", false);
@@ -241,7 +242,7 @@ public class TmCreateInspectAction extends BaseStep {
         target.put("nodeName", tgtTable);
         target.put("table", tgtTable);
         if (tgtDbType != null) target.put("databaseType", tgtDbType);
-        target.put("sortColumn", "_id");
+        target.put("sortColumn", sortColumn);
         target.put("inspectDataSource", true);
         target.put("fields", new ArrayList<>());
         target.put("isFilter", false);
@@ -257,6 +258,12 @@ public class TmCreateInspectAction extends BaseStep {
         inspectTask.put("showAdvancedVerification", false);
 
         return inspectTask;
+    }
+
+    /** 校验比对列：默认 _id（MongoDB），关系库需在 YAML 里用 sort_column 指定真实主键。 */
+    private static String sortColumn(TmInspectParameter p) {
+        String col = p.getSortColumn();
+        return (col == null || col.isBlank()) ? "_id" : col;
     }
 
     private static String text(JsonNode n, String key) {

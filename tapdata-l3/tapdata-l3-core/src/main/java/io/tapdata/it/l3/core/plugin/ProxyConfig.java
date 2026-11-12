@@ -72,26 +72,36 @@ final class ProxyConfig {
 
     /** 按优先级解析代理配置；没有任何配置时返回 {@link #none()}。 */
     static ProxyConfig load() {
+        return load(System.getenv(), System.getProperties());
+    }
+
+    /**
+     * 可注入环境变量与系统属性的解析入口（单元测试用）。
+     *
+     * @param env      环境变量视图，通常传 {@code System.getenv()}；可为空 Map
+     * @param sysProps 系统属性视图，通常传 {@code System.getProperties()}；可为空
+     */
+    static ProxyConfig load(java.util.Map<String, String> env, java.util.Properties sysProps) {
+        java.util.Map<String, String> safeEnv = env == null ? java.util.Map.of() : env;
+        java.util.Properties safeProps = sysProps == null ? new java.util.Properties() : sysProps;
+
         // 1) JVM 系统属性
-        Entry https = fromSystemProperty("https");
-        Entry http = fromSystemProperty("http");
-        List<String> bypass = mergeNonProxyHosts(
-                System.getProperty("https.nonProxyHosts"),
-                System.getProperty("http.nonProxyHosts"));
+        Entry https = fromSystemProperty(safeProps, "https");
+        Entry http = fromSystemProperty(safeProps, "http");
         if (https != null || http != null) {
-            return balanced(http, https, bypass);
+            return balanced(http, https, mergeNonProxyHosts(
+                    safeProps.getProperty("https.nonProxyHosts"),
+                    safeProps.getProperty("http.nonProxyHosts")));
         }
 
         // 2) 环境变量
-        https = fromEnv("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy");
-        http = fromEnv("HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy");
-        bypass = mergeNonProxyHosts(System.getenv("NO_PROXY"), System.getenv("no_proxy"));
-        if (https != null || http != null) {
-            return balanced(http, https, bypass);
+        ProxyConfig fromEnv = fromEnv(safeEnv);
+        if (fromEnv.isConfigured()) {
+            return fromEnv;
         }
 
         // 3) Maven settings.xml
-        Path settings = defaultSettingsPath();
+        Path settings = defaultSettingsPath(safeProps);
         if (Files.isRegularFile(settings)) {
             try {
                 ProxyConfig fromSettings = fromSettingsXml(settings);
@@ -109,6 +119,22 @@ final class ProxyConfig {
         }
 
         return none();
+    }
+
+    /**
+     * 只从环境变量构建代理配置，忽略系统属性 / settings.xml / 系统 ProxySelector。
+     * <p>
+     * 支持 {@code HTTPS_PROXY} / {@code HTTP_PROXY} / {@code ALL_PROXY}（含小写）与 {@code NO_PROXY}，
+     * 值可以是 {@code http://host:port}、{@code host:port} 或带 basic auth 的
+     * {@code http://user:pass@host:port}。
+     */
+    static ProxyConfig fromEnv(java.util.Map<String, String> env) {
+        if (env == null || env.isEmpty()) return none();
+        Entry https = fromEnv(env, "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy");
+        Entry http = fromEnv(env, "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy");
+        List<String> bypass = mergeNonProxyHosts(env.get("NO_PROXY"), env.get("no_proxy"));
+        if (https == null && http == null) return none();
+        return balanced(http, https, bypass);
     }
 
     boolean isConfigured() {
@@ -133,9 +159,12 @@ final class ProxyConfig {
         log.info("[ProxyConfig] Maven Resolver proxy enabled: {}", summary());
     }
 
-    /** 返回本次请求应使用的代理；未配置或命中 nonProxyHosts 时返回 null。 */
+    /** 返回本次请求应使用的代理；未配置、非 http(s) 协议或命中 nonProxyHosts 时返回 null。 */
     java.net.Proxy proxyFor(URI uri) {
-        Entry entry = "https".equalsIgnoreCase(uri.getScheme()) ? https : http;
+        String scheme = uri.getScheme();
+        // file: 等本地仓库协议不能走 HTTP 代理
+        if (!"http".equalsIgnoreCase(scheme) && !"https".equalsIgnoreCase(scheme)) return null;
+        Entry entry = "https".equalsIgnoreCase(scheme) ? https : http;
         if (entry == null) return null;
         if (shouldBypass(uri.getHost())) {
             log.debug("[ProxyConfig] Bypass proxy for host {}", uri.getHost());
@@ -173,19 +202,19 @@ final class ProxyConfig {
     // 各来源解析
     // ------------------------------------------------------------------
 
-    private static Entry fromSystemProperty(String scheme) {
-        String host = System.getProperty(scheme + ".proxyHost");
+    private static Entry fromSystemProperty(java.util.Properties props, String scheme) {
+        String host = props.getProperty(scheme + ".proxyHost");
         if (host == null || host.isBlank()) return null;
-        int port = parseInt(System.getProperty(scheme + ".proxyPort"), "https".equals(scheme) ? 443 : 80);
+        int port = parseInt(props.getProperty(scheme + ".proxyPort"), "https".equals(scheme) ? 443 : 80);
         return new Entry(host.trim(), port,
-                blankToNull(System.getProperty(scheme + ".proxyUser")),
-                blankToNull(System.getProperty(scheme + ".proxyPassword")),
+                blankToNull(props.getProperty(scheme + ".proxyUser")),
+                blankToNull(props.getProperty(scheme + ".proxyPassword")),
                 "-D" + scheme + ".proxyHost");
     }
 
-    private static Entry fromEnv(String... names) {
+    private static Entry fromEnv(java.util.Map<String, String> env, String... names) {
         for (String name : names) {
-            String raw = System.getenv(name);
+            String raw = env.get(name);
             if (raw == null || raw.isBlank()) continue;
             try {
                 return parseProxyUrl(raw.trim(), "env " + name);
@@ -286,10 +315,10 @@ final class ProxyConfig {
         return balanced(httpEntry, httpsEntry, bypass);
     }
 
-    private static Path defaultSettingsPath() {
-        String explicit = System.getProperty("maven.settings");
+    private static Path defaultSettingsPath(java.util.Properties props) {
+        String explicit = props.getProperty("maven.settings");
         if (explicit != null && !explicit.isBlank()) return Path.of(explicit);
-        return Path.of(System.getProperty("user.home", "."), ".m2", "settings.xml");
+        return Path.of(props.getProperty("user.home", "."), ".m2", "settings.xml");
     }
 
     private static String text(Element parent, String tag) {

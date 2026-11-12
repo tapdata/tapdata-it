@@ -5,7 +5,6 @@ import org.eclipse.aether.RepositorySystem;
 import org.eclipse.aether.artifact.Artifact;
 import org.eclipse.aether.artifact.DefaultArtifact;
 import org.eclipse.aether.collection.CollectRequest;
-import org.eclipse.aether.collection.CollectResult;
 import org.eclipse.aether.graph.Dependency;
 import org.eclipse.aether.graph.DependencyNode;
 import org.eclipse.aether.repository.LocalRepository;
@@ -16,6 +15,10 @@ import org.eclipse.aether.resolution.DependencyRequest;
 import org.eclipse.aether.resolution.DependencyResult;
 import org.eclipse.aether.supplier.RepositorySystemSupplier;
 import org.eclipse.aether.transport.http.HttpTransporterFactory;
+import org.eclipse.aether.util.graph.selector.AndDependencySelector;
+import org.eclipse.aether.util.graph.selector.ExclusionDependencySelector;
+import org.eclipse.aether.util.graph.selector.OptionalDependencySelector;
+import org.eclipse.aether.util.graph.selector.ScopeDependencySelector;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -70,6 +73,15 @@ public class MavenPluginResolver {
     private final int downloadConcurrency;
     private volatile boolean shutdown = false;
 
+    /** 传递依赖 collect 阶段超时（秒）—— 可用环境变量 OVERRIDE。 */
+    static final String ENV_COLLECT_TIMEOUT = "L3_MAVEN_COLLECT_TIMEOUT_SECONDS";
+    /** 连接超时（毫秒）—— 走不通的仓库尽快失败，不拖垮整个 collect。 */
+    static final String ENV_CONNECT_TIMEOUT = "L3_MAVEN_CONNECT_TIMEOUT_MS";
+    /** 读取超时（毫秒）。 */
+    static final String ENV_REQUEST_TIMEOUT = "L3_MAVEN_REQUEST_TIMEOUT_MS";
+
+    private final int collectTimeoutSeconds;
+
     /**
      * 构造 — 使用默认本地仓库（~/.m2/repository）+ 默认 Maven Central。
      */
@@ -94,6 +106,15 @@ public class MavenPluginResolver {
      * @param downloadConcurrency 下载依赖的并发线程数，必须 >=1（过小会自动 clamp 到 1）
      */
     public MavenPluginResolver(String localRepoDir, List<String> remoteRepoUrls, int downloadConcurrency) {
+        this(localRepoDir, remoteRepoUrls, downloadConcurrency, null);
+    }
+
+    /**
+     * @param proxyConfig 显式代理配置（单元测试用）。传 {@code null} 时按
+     *                    JVM 系统属性 → 环境变量 → settings.xml → 系统 ProxySelector 自动解析。
+     */
+    MavenPluginResolver(String localRepoDir, List<String> remoteRepoUrls, int downloadConcurrency,
+                        ProxyConfig proxyConfig) {
         this.localRepoDir = Path.of(localRepoDir);
         Path localRepo = this.localRepoDir;
         try {
@@ -169,10 +190,28 @@ public class MavenPluginResolver {
         // 忽略 pom 里 <repositories> 声明的额外仓库 —— 只用我们显式配置的这些
         session.setIgnoreArtifactDescriptorRepositories(true);
 
+        // 依赖选择器 —— 与 Maven 默认一致：排除 test/provided 作用域、optional 依赖和
+        // <exclusions> 声明的子树。
+        // 不设置时 Aether 会遍历 optional 依赖（典型：mysql-connector-j 的
+        // oci-java-sdk-common → 大量传递依赖 → byteman 多版本 POM），collect 阶段
+        // 每个 POM 一次网络请求，最终超时并降级成 "只加载直接 jar"。
+        session.setDependencySelector(new AndDependencySelector(
+                new ScopeDependencySelector("test", "provided"),
+                new OptionalDependencySelector(),
+                new ExclusionDependencySelector()));
+
+        // 连接/读取超时 —— 不可达仓库尽快失败，避免 collect 被单个 POM 拖住。
+        session.setConfigProperty("aether.connector.connectTimeout", intEnv(ENV_CONNECT_TIMEOUT, 10_000));
+        session.setConfigProperty("aether.connector.requestTimeout", intEnv(ENV_REQUEST_TIMEOUT, 60_000));
+        session.setConfigProperty("aether.connector.http.retryHandler.count", 1);
+
         // 统一代理配置：手动下载 + Maven Resolver 共用同一份
-        // 优先级：JVM 系统属性 → 环境变量 → ~/.m2/settings.xml → 系统 ProxySelector
-        this.proxyConfig = ProxyConfig.load();
+        // 优先级：JVM 系统属性 → 环境变量（HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY）→
+        //        ~/.m2/settings.xml → 系统 ProxySelector
+        this.proxyConfig = proxyConfig != null ? proxyConfig : ProxyConfig.load();
         this.proxyConfig.applyTo(session);
+
+        this.collectTimeoutSeconds = intEnv(ENV_COLLECT_TIMEOUT, 180);
 
         // 3. Build remote repos — URL 规范化 + 自动 discover 子仓库 + 去重 + 兜底 Maven Central
         this.remoteRepos = new ArrayList<>();
@@ -262,6 +301,10 @@ public class MavenPluginResolver {
 
         // 已经是完整仓库路径 —— 直接返回
         if (url.contains("/repository/") || url.contains("/artifactory/") || url.contains("/maven2")) {
+            return List.of(url.endsWith("/") ? url : url + "/");
+        }
+        // 本地 file 仓库（单元测试 / 离线镜像）—— 原样保留，不做 Nexus 展开
+        if (url.startsWith("file:")) {
             return List.of(url.endsWith("/") ? url : url + "/");
         }
 
@@ -402,6 +445,21 @@ public class MavenPluginResolver {
     private Path expectedLocalJarPath(Artifact artifact) {
         return localRepoDir.resolve(artifact.getGroupId().replace('.', '/') + "/" + artifact.getArtifactId()
                 + "/" + artifact.getVersion() + "/" + artifact.getArtifactId() + "-" + artifact.getVersion() + ".jar");
+    }
+
+    /** 读取整数型环境变量，缺失/非法时返回默认值。 */
+    private static int intEnv(String name, int defaultValue) {
+        String raw = System.getenv(name);
+        if (raw == null || raw.isBlank()) {
+            return defaultValue;
+        }
+        try {
+            int v = Integer.parseInt(raw.trim());
+            return v > 0 ? v : defaultValue;
+        } catch (NumberFormatException e) {
+            log.warn("[MavenPluginResolver] Ignoring invalid {}={}", name, raw);
+            return defaultValue;
+        }
     }
 
     /** 取异常链最底层的信息，避免错误提示只显示外层包装异常。 */
@@ -670,15 +728,13 @@ public class MavenPluginResolver {
         }
 
         // === Stage 2: collect + resolve 传递依赖（串行 — Maven Resolver 整体操作）===
-        // 注意：Maven Resolver 对本地已有的 pom 做 "verifying that is downloadable from" 慢速远端验证
-        // 是已知问题（本地 metadata _remote.repositories 记录的 repo ID 与 session 配置不匹配）。
-        // 我们已经：① 设了 setUpdatePolicy("daily") ② setIgnoreArtifactDescriptorRepositories(true)
-        // ③ 构造时清理 _remote.repositories。但 collect 阶段仍可能因 profile activation（需 Java 版本属性）
-        //    或 parent pom 缺失而失败，更糟的是 HTTP 连接 hang 住不返回。
-        //
-        // 解决：给 collect 阶段加 30s 超时 —— 超时/失败都 fallback 到 direct jars only。
-        // 生产场景下 step 模块传递依赖（Jackson/SLF4J 等）宿主 fat jar 已有，
-        // extra_deps 动态下载的 artifact（如 sqlite-jdbc）本身也没有 compile scope 传递依赖，够用。
+        // 关键点：
+        //  ① session 已配置 Maven 默认 DependencySelector（排除 test/provided/optional/exclusions），
+        //     optional 子树不再被遍历，避免了大量无关 POM 的网络请求。
+        //  ② 连接/读取超时已注入，不可达仓库快速失败。
+        //  ③ collect + resolveDependencies 有整体超时兜底（默认 180s，可用
+        //     L3_MAVEN_COLLECT_TIMEOUT_SECONDS 覆盖），超时才降级为仅直接 jar。
+        long stage2Start = System.currentTimeMillis();
         try {
             CollectRequest collectRequest = new CollectRequest();
             for (String coord : coordinates) {
@@ -686,37 +742,51 @@ public class MavenPluginResolver {
             }
             collectRequest.setRepositories(remoteRepos);
 
-            // 用单独线程跑 collect，超时直接 fallback —— 避免 Maven Resolver HTTP hang
             ExecutorService oneShot = Executors.newSingleThreadExecutor(r -> {
                 Thread t = new Thread(r, "mvn-collect");
                 t.setDaemon(true);
                 return t;
             });
-            Future<CollectResult> collectFuture = oneShot.submit(() ->
-                    repositorySystem.collectDependencies(session, collectRequest));
-            CollectResult collectResult;
+            Future<DependencyResult> resolveFuture = oneShot.submit(() -> {
+                DependencyRequest dependencyRequest = new DependencyRequest(collectRequest, null);
+                return repositorySystem.resolveDependencies(session, dependencyRequest);
+            });
+
+            DependencyResult dependencyResult;
             try {
-                // 120s — 远端 nexus 走代理时 POM 元数据抓取较慢，30s 会把传递依赖整体砍掉
-                //（典型后果：dbforge/jdbc step 缺 mysql-connector 驱动）
-                collectResult = collectFuture.get(120, TimeUnit.SECONDS);
+                dependencyResult = resolveFuture.get(collectTimeoutSeconds, TimeUnit.SECONDS);
             } catch (TimeoutException te) {
-                collectFuture.cancel(true);
+                resolveFuture.cancel(true);
                 oneShot.shutdownNow();
-                log.warn("[MavenPluginResolver] collectDependencies timed out after 120s — " +
-                        "falling back to direct jars only (transitive deps skipped)");
+                log.warn("[MavenPluginResolver] Transitive dependency resolution timed out after {}s — " +
+                        "falling back to direct jars only. Raise or lower the budget with {}.",
+                        collectTimeoutSeconds, ENV_COLLECT_TIMEOUT);
                 return result;
             }
             oneShot.shutdownNow();
 
-            DependencyRequest dependencyRequest = new DependencyRequest();
-            dependencyRequest.setCollectRequest(collectRequest);
-            repositorySystem.resolveDependencies(session, dependencyRequest);
+            // 优先使用 resolveDependencies 的产物 —— 它已经完成了版本仲裁 + 逐个下载
+            for (ArtifactResult ar : dependencyResult.getArtifactResults()) {
+                Path file = ar.getArtifact().getFile() != null ? ar.getArtifact().getFile().toPath() : null;
+                String coord = ar.getArtifact().getGroupId() + ":" + ar.getArtifact().getArtifactId()
+                        + ":" + ar.getArtifact().getVersion();
+                if (file != null && Files.isRegularFile(file) && seen.add(coord)) {
+                    result.add(file);
+                } else if (!ar.isResolved()) {
+                    log.warn("[MavenPluginResolver] Transitive dep not resolved: {} — {}",
+                            coord, ar.getExceptions().isEmpty() ? "unknown" : ar.getExceptions().get(0).getMessage());
+                }
+            }
 
-            // 遍历所有 resolved 依赖节点（跳过顶层本身 —— 已经加过了）
-            collectResult.getRoot().getChildren().forEach(child -> collectAndResolveJars(child, result, seen));
+            // 兜底：遍历依赖树，把 resolveDependencies 未覆盖的节点单独拉下来
+            // （scope mediation / BOM chain 异常时仍能保留已 collect 到的节点信息）
+            collectAndResolveJars(dependencyResult.getRoot(), result, seen);
+
+            log.info("[MavenPluginResolver] Transitive resolution done in {} ms",
+                    System.currentTimeMillis() - stage2Start);
         } catch (Exception e) {
             log.warn("[MavenPluginResolver] Dependency graph resolution failed ({}), falling back to direct jars only",
-                    e.getMessage());
+                    rootMessage(e));
             log.debug("[MavenPluginResolver] Full stacktrace:", e);
         }
 
@@ -767,6 +837,13 @@ public class MavenPluginResolver {
      */
     private void collectAndResolveJars(DependencyNode node, List<Path> result, Set<String> seen) {
         Artifact a = node.getArtifact();
+        if (a == null) {
+            // collect 根节点没有 artifact —— 只递归 children
+            for (DependencyNode child : node.getChildren()) {
+                collectAndResolveJars(child, result, seen);
+            }
+            return;
+        }
         String coord = a.getGroupId() + ":" + a.getArtifactId() + ":" + a.getVersion();
         if (!seen.add(coord)) {
             // 已添加过 —— 但还是要继续遍历 children（不同路径可能指向同一个 artifact）

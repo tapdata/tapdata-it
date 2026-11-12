@@ -163,13 +163,14 @@ public class DeployTapdataAction extends BaseStep {
 
         // ---- 9. helm upgrade --install（幂等：首次安装 / 重跑升级均可，values 变化触发滚动更新）----
         // --wait 会等 Pod Ready。chart 已配 startupProbe（900s 窗口），Ready 需等 TM 真正监听 3030
-        // （实测冷启动约 7~8 分钟），所以 helm 超时必须大于 startupProbe 窗口。
+        // （本机实测冷启动约 8~13 分钟），所以 helm 超时必须大于 startupProbe 窗口。
+        // 2 TM + 2 Engine + 2 ApiServer 的 HA 场景是并行滚动，但仍会叠加冷启动时间，取 1800s。
         String helmInstall = String.format(
                 "helm upgrade --install %s %s -n %s --create-namespace " +
-                        "--wait --timeout 900s -f %s",
+                        "--wait --timeout 1800s -f %s",
                 helmRelease, REMOTE_CHART, namespace, REMOTE_VALUES);
         try {
-            k8s.exec(helmInstall, 950_000L).assertSuccess("helm upgrade --install " + helmRelease);
+            k8s.exec(helmInstall, 1_880_000L).assertSuccess("helm upgrade --install " + helmRelease);
         } catch (Exception helmErr) {
             // helm --wait 失败常见原因：Pod 未 Ready。快速排查是否 License 过期导致 TM 主动 shutdown，
             // 给出明确错误，避免用户在 "connection refused" / "pod not ready" 上绕圈。
@@ -236,10 +237,10 @@ public class DeployTapdataAction extends BaseStep {
      */
     private void assertPodsReady(K8sClient k8s, String namespace, int minReadyPods) throws Exception {
         K8sClient.ExecResult wait = k8s.exec(
-                "kubectl -n " + namespace + " wait --for=condition=Ready pod --all --timeout=300s",
-                320_000L);
+                "kubectl -n " + namespace + " wait --for=condition=Ready pod --all --timeout=600s",
+                620_000L);
         if (!wait.isSuccess()) {
-            throw new RuntimeException("Pods not Ready within 300s in namespace '" + namespace
+            throw new RuntimeException("Pods not Ready within 600s in namespace '" + namespace
                     + "': " + wait.getStdoutTrimmed());
         }
         K8sClient.ExecResult count = k8s.exec(

@@ -72,6 +72,13 @@ public class TmAssertInspectResultAction extends BaseStep {
 
         JsonNode inspectInfo = client.get("/api/Inspects/find/" + inspectId);
 
+        // 校验任务必须已经跑完 —— 否则"无差异"只是查无结果，不能当成数据一致（假通过）。
+        String inspectStatus = text(inspectInfo, "status");
+        if (!isFinished(inspectStatus)) {
+            throw new AssertionFailedException("Inspect " + inspectId
+                    + " has not finished yet (status=" + inspectStatus + "); cannot assert consistency");
+        }
+
         // 结果落点有两种：
         // 1) InspectDto.inspectResult — TM 真实结构，明细在 stats[]（每表一条，result=passed/failed）
         //    汇总差异行数在 differenceNumber / difference_number
@@ -149,6 +156,14 @@ public class TmAssertInspectResultAction extends BaseStep {
 
     private static String text(JsonNode n, String key) {
         return n.has(key) && !n.get(key).isNull() ? n.get(key).asText() : null;
+    }
+
+    /** 校验任务是否已到终态（done / complete / success / failed / error / cancel）。 */
+    private static boolean isFinished(String status) {
+        if (status == null) return false;
+        String s = status.toLowerCase();
+        return s.contains("done") || s.contains("complete") || s.contains("success")
+                || s.contains("fail") || s.contains("error") || s.contains("cancel");
     }
 
     /** 按候选字段名依次取值（兼容 camelCase / snake_case），缺省 0。 */
