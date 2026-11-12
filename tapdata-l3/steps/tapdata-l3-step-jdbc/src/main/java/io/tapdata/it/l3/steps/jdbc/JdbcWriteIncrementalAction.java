@@ -190,16 +190,17 @@ public class JdbcWriteIncrementalAction extends BaseStep {
         Map<String, Integer> counts = p.getOperationCounts();
         ThreadLocalRandom random = ThreadLocalRandom.current();
 
-        // 获取表的列信息
-        List<String> allColumns = new ArrayList<>();
+        // 获取表的列信息（列名 → DATA_TYPE，按类型绑定值 —— 随机字符串插进 INT 列会被 MySQL 拒绝）
+        java.util.Map<String, Integer> columnTypes = new java.util.LinkedHashMap<>();
         String idColumn = "id"; // 假设第一列是主键
         try (Connection conn = openConnection(p)) {
             try (ResultSet rs = conn.getMetaData().getColumns(null, null, tableName, null)) {
                 while (rs.next()) {
-                    allColumns.add(rs.getString("COLUMN_NAME"));
+                    columnTypes.put(rs.getString("COLUMN_NAME"), rs.getInt("DATA_TYPE"));
                 }
             }
         }
+        List<String> allColumns = new ArrayList<>(columnTypes.keySet());
         if (allColumns.isEmpty()) {
             throw new IllegalStateException("No columns found for table: " + tableName);
         }
@@ -231,8 +232,9 @@ public class JdbcWriteIncrementalAction extends BaseStep {
                     for (int i = 0; i < totalInsert; i++) {
                         int colIdx = 1;
                         ps.setLong(colIdx++, idMax + i + 1);
-                        for (int c = 0; c < valueColumns.size(); c++) {
-                            bindRandomValue(ps, colIdx++, random);
+                        for (String col : valueColumns) {
+                            bindRandomValue(ps, colIdx++, random,
+                                    columnTypes.getOrDefault(col, java.sql.Types.VARCHAR));
                         }
                         ps.addBatch();
                     }
@@ -255,7 +257,8 @@ public class JdbcWriteIncrementalAction extends BaseStep {
                                 quoteId(tableName), quoteId(updateCol), quoteId(idColumn));
                         try (PreparedStatement ps = conn.prepareStatement(updateSql)) {
                             for (int i = 0; i < totalUpdate; i++) {
-                                ps.setString(1, "updated_" + random.nextInt(100000));
+                                bindRandomValue(ps, 1, random,
+                                        columnTypes.getOrDefault(updateCol, java.sql.Types.VARCHAR));
                                 ps.setLong(2, random.nextLong(minId, idMax + 1));
                                 ps.addBatch();
                             }
@@ -331,14 +334,23 @@ public class JdbcWriteIncrementalAction extends BaseStep {
         return 0;
     }
 
-    private void bindRandomValue(PreparedStatement ps, int idx, ThreadLocalRandom random) throws SQLException {
-        int type = random.nextInt(5);
-        switch (type) {
-            case 0 -> ps.setInt(idx, random.nextInt(-10000, 10000));
-            case 1 -> ps.setLong(idx, random.nextLong(-1000000, 1000000));
-            case 2 -> ps.setString(idx, "inc_" + random.nextInt(100000));
-            case 3 -> ps.setDouble(idx, random.nextDouble() * 1000 - 500);
-            default -> ps.setBoolean(idx, random.nextBoolean());
+    /** 按列的实际 DATA_TYPE 绑定匹配类型的随机值（对齐 JdbcInitSourceAction 的类型映射）。 */
+    private void bindRandomValue(PreparedStatement ps, int idx, ThreadLocalRandom random, int sqlType) throws SQLException {
+        switch (sqlType) {
+            case java.sql.Types.TINYINT, java.sql.Types.SMALLINT,
+                 java.sql.Types.INTEGER -> ps.setInt(idx, random.nextInt(-100000, 100000));
+            case java.sql.Types.BIGINT -> ps.setLong(idx, random.nextLong(-1000000, 1000000));
+            case java.sql.Types.REAL, java.sql.Types.FLOAT ->
+                    ps.setFloat(idx, (float) (random.nextDouble() * 1000 - 500));
+            case java.sql.Types.DOUBLE, java.sql.Types.NUMERIC, java.sql.Types.DECIMAL ->
+                    ps.setDouble(idx, random.nextDouble() * 10000 - 5000);
+            case java.sql.Types.DATE -> ps.setDate(idx, java.sql.Date.valueOf("2024-01-15"));
+            case java.sql.Types.TIME, java.sql.Types.TIME_WITH_TIMEZONE ->
+                    ps.setTime(idx, java.sql.Time.valueOf("12:00:00"));
+            case java.sql.Types.TIMESTAMP, java.sql.Types.TIMESTAMP_WITH_TIMEZONE ->
+                    ps.setTimestamp(idx, java.sql.Timestamp.valueOf("2024-01-01 12:00:00"));
+            case java.sql.Types.BOOLEAN, java.sql.Types.BIT -> ps.setBoolean(idx, random.nextBoolean());
+            default -> ps.setString(idx, "inc_" + random.nextInt(100000));
         }
     }
 

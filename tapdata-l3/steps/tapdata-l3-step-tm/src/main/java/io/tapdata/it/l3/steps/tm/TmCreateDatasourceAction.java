@@ -151,7 +151,7 @@ public class TmCreateDatasourceAction extends BaseStep {
 
         // Auto-cleanup unless keep_alive
         if (!config.isKeepAlive() && connectionId != null) {
-            ctx.registerCleanup(() -> {
+            ctx.registerCleanup("tm", () -> {
                 try {
                     log.info("[TM] Auto-deleting Connection {}", connectionId);
                     client.delete("/api/Connections/" + connectionId);
@@ -169,22 +169,43 @@ public class TmCreateDatasourceAction extends BaseStep {
         return success(outputs);
     }
 
-    /** Query /api/DatabaseTypes to find the pdkHash matching the given database type. */
+    /**
+     * Query /api/DatabaseTypes to find the pdkHash matching the given database type.
+     * 全新集群上 connectors 由 engine 启动后陆续注册到 TM，
+     * DatabaseTypes 可能延迟数分钟才出现目标类型 — 轮询等待。
+     */
     private String resolvePdkHash(String databaseType) throws IOException, InterruptedException {
-        JsonNode types = client.get("/api/DatabaseTypes");
-        if (types.isArray()) {
-            for (JsonNode t : types) {
-                String tType = text(t, "type");
-                String tName = text(t, "name");
-                if (databaseType.equalsIgnoreCase(tType) || databaseType.equalsIgnoreCase(tName)) {
-                    String hash = text(t, "pdkHash");
-                    if (hash != null) return hash;
+        long deadline = System.currentTimeMillis() + PDK_RESOLVE_TIMEOUT_MS;
+        int attempt = 0;
+        while (true) {
+            attempt++;
+            JsonNode types = client.get("/api/DatabaseTypes");
+            if (types.isArray()) {
+                for (JsonNode t : types) {
+                    String tType = text(t, "type");
+                    String tName = text(t, "name");
+                    if (databaseType.equalsIgnoreCase(tType) || databaseType.equalsIgnoreCase(tName)) {
+                        String hash = text(t, "pdkHash");
+                        if (hash != null) return hash;
+                    }
                 }
             }
+            if (System.currentTimeMillis() >= deadline) {
+                throw new IllegalArgumentException("Cannot auto-resolve pdkHash for database_type='" + databaseType
+                        + "' after " + attempt + " attempts over " + (PDK_RESOLVE_TIMEOUT_MS / 1000)
+                        + "s. Pass pdk_hash explicitly or check /api/DatabaseTypes for supported types.");
+            }
+            if (attempt == 1 || attempt % 6 == 0) {
+                log.info("[TM] DatabaseTypes not containing '{}' yet (attempt {}), waiting for engine connector registration...",
+                        databaseType, attempt);
+            }
+            Thread.sleep(PDK_RESOLVE_POLL_MS);
         }
-        throw new IllegalArgumentException("Cannot auto-resolve pdkHash for database_type='" + databaseType
-                + "'. Pass pdk_hash explicitly or check /api/DatabaseTypes for supported types.");
     }
+
+    /** pdkHash 自动解析等待窗口 — 覆盖新集群 engine connector 注册延迟。 */
+    private static final long PDK_RESOLVE_TIMEOUT_MS = 300_000L;
+    private static final long PDK_RESOLVE_POLL_MS = 5_000L;
 
     private static String text(JsonNode n, String key) {
         return n.has(key) && !n.get(key).isNull() ? n.get(key).asText() : null;

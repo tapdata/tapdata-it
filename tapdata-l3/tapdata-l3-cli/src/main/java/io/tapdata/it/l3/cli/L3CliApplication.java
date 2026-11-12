@@ -1,12 +1,18 @@
 package io.tapdata.it.l3.cli;
 
-import io.tapdata.it.l3.common.ParallelBlock;
+import io.tapdata.it.l3.common.ScenarioBlocks;
 import io.tapdata.it.l3.common.ScenarioConfig;
 import io.tapdata.it.l3.common.StepConfig;
 import io.tapdata.it.l3.core.L3CoreApplication;
 import io.tapdata.it.l3.core.dsl.DslParser;
+import io.tapdata.it.l3.core.dsl.SpelStaticScanner;
 import io.tapdata.it.l3.core.plugin.PluginCenter;
+import io.tapdata.it.l3.core.console.ConsoleUI;
 import io.tapdata.it.l3.core.plugin.PluginCenter.PluginLoadException;
+import io.tapdata.it.l3.core.report.JsonReportGenerator;
+import io.tapdata.it.l3.core.report.JUnitXmlReportGenerator;
+import io.tapdata.it.l3.core.report.HtmlReportGenerator;
+import io.tapdata.it.l3.core.report.ReportWriter;
 import io.tapdata.it.l3.core.result.ScenarioResult;
 import io.tapdata.it.l3.core.runner.ScenarioRunner;
 import io.tapdata.it.l3.plugin.ActionHandler;
@@ -20,7 +26,6 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.stream.Collectors;
 
 /**
  * TapData L3 CLI — Picocli command-line wrapper around the Spring Boot core.
@@ -106,11 +111,16 @@ public class L3CliApplication implements Runnable {
             @Mixin MavenRepoOptions mavenOpts,
             @Option(names = {"--dir"}, required = true, description = "Directory containing .yaml case files")
             String dir,
+            @Option(names = {"--no-recursive"},
+                    description = "Only scan --dir itself, skip subdirectories (default: recursive)")
+            boolean noRecursive,
             @Option(names = {"--group"}, description = "Filter scenarios by group (functional|destructive|stability)")
             String group,
             @Option(names = {"--case-ids"}, description = "Comma-separated case_id filter (e.g. L3-F-01,L3-F-02)")
             String caseIds,
-            @Option(names = {"--output"}, description = "Output directory for reports and logs")
+            @Option(names = {"--output"},
+                    description = "Output directory for reports and logs "
+                            + "(default: reports/<yyyyMMdd-HHmmss> — one directory per run)")
             String outputDir
     ) {
         String[] springArgs = buildSpringBootArgs(mavenOpts);
@@ -119,7 +129,12 @@ public class L3CliApplication implements Runnable {
             ScenarioRunner runner = ctx.getBean(ScenarioRunner.class);
 
             Path dirPath = Paths.get(dir);
-            List<ScenarioConfig> scenarios = parser.parseDirectorySafe(dirPath);
+            DslParser.ParseOutcome outcome = parser.parseDirectoryDetailed(dirPath, !noRecursive);
+            List<ScenarioConfig> scenarios = new ArrayList<>(outcome.scenarios());
+            // 解析失败的文件只是跳过（run 模式宽容；validate 模式会算 error）
+            for (DslParser.SkippedFile s : outcome.skipped()) {
+                ConsoleUI.warn("skipped " + s.file().getFileName() + " — " + s.reason());
+            }
 
             if (group != null) {
                 scenarios = scenarios.stream()
@@ -134,30 +149,40 @@ public class L3CliApplication implements Runnable {
             }
 
             if (scenarios.isEmpty()) {
-                System.out.println("[L3] No scenarios to run after filtering.");
+                ConsoleUI.warn("no scenarios to run after filtering");
                 return 0;
             }
 
-            System.out.printf("[L3] Will execute %d scenario(s): %s%n",
-                    scenarios.size(),
-                    scenarios.stream().map(s -> s.getCaseId() + " (" + s.getScenario() + ")")
-                            .collect(Collectors.joining(", ")));
+            ConsoleUI.banner(scenarios);
 
             List<ScenarioResult> results = new ArrayList<>();
-            int passed = 0, failed = 0;
+            int scenarioIndex = 0;
             for (ScenarioConfig scenario : scenarios) {
+                ConsoleUI.scenarioStart(++scenarioIndex, scenarios.size(), scenario);
                 ScenarioResult result = runner.execute(scenario);
+                ConsoleUI.scenarioEnd(result);
                 results.add(result);
-                if (result.isSuccess()) passed++; else failed++;
             }
 
-            System.out.println();
-            System.out.println("================================================");
-            System.out.printf("[L3] Execution Summary: %d passed, %d failed, %d total%n",
-                    passed, failed, scenarios.size());
-            System.out.println("================================================");
+            // ---- 三格式测试报告（JSON / JUnit XML / HTML）----
+            // 默认输出到时间戳目录，历次运行互不覆盖
+            Path reportDir = outputDir != null && !outputDir.isBlank()
+                    ? Paths.get(outputDir)
+                    : Paths.get("reports", java.time.LocalDateTime.now()
+                            .format(java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")));
+            List<Path> reportFiles = new ArrayList<>();
+            try {
+                ReportWriter.writeAll(results, reportDir);
+                reportFiles.add(reportDir.resolve(JsonReportGenerator.FILE_NAME));
+                reportFiles.add(reportDir.resolve(JUnitXmlReportGenerator.FILE_NAME));
+                reportFiles.add(reportDir.resolve(HtmlReportGenerator.FILE_NAME));
+                ConsoleUI.event("report", "written to " + reportDir.toAbsolutePath());
+            } catch (Exception reportError) {
+                ConsoleUI.warn("report generation failed: " + reportError.getMessage());
+            }
 
-            return failed == 0 ? 0 : 1;
+            ConsoleUI.summary(results, reportFiles);
+            return results.stream().allMatch(ScenarioResult::isSuccess) ? 0 : 1;
         } catch (Exception e) {
             System.err.println("[L3] Fatal error: " + e.getMessage());
             return 2;
@@ -195,7 +220,10 @@ public class L3CliApplication implements Runnable {
     int validate(
             @Mixin MavenRepoOptions mavenOpts,
             @Option(names = {"--dir"}, required = true, description = "Directory containing .yaml case files")
-            String dir
+            String dir,
+            @Option(names = {"--no-recursive"},
+                    description = "Only scan --dir itself, skip subdirectories (default: recursive)")
+            boolean noRecursive
     ) {
         String[] springArgs = buildSpringBootArgs(mavenOpts);
         try (ConfigurableApplicationContext ctx = SpringApplication.run(L3CoreApplication.class, springArgs)) {
@@ -204,16 +232,24 @@ public class L3CliApplication implements Runnable {
 
             Path dirPath = Paths.get(dir);
 
-            // === Stage 1: DSL 语法校验 ===
-            List<ScenarioConfig> scenarios = parser.parseDirectorySafe(dirPath);
+            // === Stage 0: 目录扫描 — 解析失败的文件算 error（被跳过的 case = 静默失去的覆盖率）===
+            DslParser.ParseOutcome outcome = parser.parseDirectoryDetailed(dirPath, !noRecursive);
+            List<ScenarioConfig> scenarios = outcome.scenarios();
+            int skippedErrors = 0;
+            for (DslParser.SkippedFile s : outcome.skipped()) {
+                System.err.println("[L3] ❌ SKIPPED FILE (counts as error): " + s.file()
+                        + " — " + s.reason());
+                skippedErrors++;
+            }
             if (scenarios.isEmpty()) {
                 System.err.println("[L3] ❌ No valid scenario files found in " + dir);
                 return 1;
             }
-            System.out.printf("\n[L3] Parsed %d scenario(s), starting full validation...%n%n", scenarios.size());
+            System.out.printf("\n[L3] Parsed %d scenario(s), %d skipped file(s), starting full validation...%n%n",
+                    scenarios.size(), outcome.skipped().size());
 
             // === Stage 2: 对每个 scenario 做依赖预加载 + handler.validate() + 框架级校验 ===
-            int totalErrors = 0;
+            int totalErrors = skippedErrors;
             int totalSteps = 0;
             int passed = 0;
             int scenarioIdx = 0;
@@ -230,6 +266,17 @@ public class L3CliApplication implements Runnable {
 
                     System.out.printf("─── Scenario %d/%d: %s (%s) ───%n",
                             scenarioIdx, scenarios.size(), scenario.getCaseId(), scenario.getScenario());
+
+                    // 2a-0. SpEL 静态扫描 — 引用了不存在的 step / env key 提前暴露（运行时才会炸的错）
+                    List<SpelStaticScanner.Finding> spelFindings = SpelStaticScanner.scan(scenario);
+                    if (!spelFindings.isEmpty()) {
+                        System.out.printf("  ⚠️  SpEL static scan: %d finding(s)%n", spelFindings.size());
+                        for (SpelStaticScanner.Finding f : spelFindings) {
+                            String icon = "error".equals(f.severity()) ? "❌" : "⚠️";
+                            System.out.printf("      %s [%s] %s%n", icon, f.severity(), f.message());
+                            if ("error".equals(f.severity())) totalErrors++;
+                        }
+                    }
 
                     // 2a. 依赖预加载（统一下载所有 jar + runtime deps + 传递依赖）
                     boolean preloadOk = true;
@@ -289,15 +336,15 @@ public class L3CliApplication implements Runnable {
 
             // === 最终汇总 ===
             System.out.println("================================================================");
-            System.out.printf("[L3] Validation Summary: %d scenario(s), %d step(s) → %d error(s)%n",
-                    scenarios.size(), totalSteps, totalErrors);
+            System.out.printf("[L3] Validation Summary: %d scenario(s), %d step(s), %d skipped file(s) → %d error(s)%n",
+                    scenarios.size(), totalSteps, outcome.skipped().size(), totalErrors);
             if (totalErrors == 0) {
                 System.out.printf("  ✅ All %d scenario(s) passed validation — safe to run.%n", passed);
                 System.out.println("================================================================");
                 return 0;
             } else {
-                System.out.printf("  ❌ %d scenario(s) have errors — fix configuration before running.%n",
-                        scenarios.size() - passed);
+                System.out.printf("  ❌ %d error(s) found (skipped files + static scan + step config) — fix before running.%n",
+                        totalErrors);
                 System.out.println("================================================================");
                 return 1;
             }
@@ -309,14 +356,9 @@ public class L3CliApplication implements Runnable {
 
     // ==================== validate 子命令辅助方法（CLI 本地版，避免依赖 ScenarioRunner private 方法） ====================
 
-    /** 从 scenario 所有 blocks 收集扁平的 StepConfig 列表。 */
+    /** 从 scenario 所有 blocks 收集扁平的 StepConfig 列表（含 if / for / switch 嵌套分支）。 */
     private static List<StepConfig> collectAllStepsLocal(ScenarioConfig scenario) {
-        List<StepConfig> result = new ArrayList<>();
-        for (Object block : scenario.getBlocks()) {
-            if (block instanceof StepConfig step) result.add(step);
-            else if (block instanceof ParallelBlock p) result.addAll(p.getSteps());
-        }
-        return result;
+        return ScenarioBlocks.collectSteps(scenario.getBlocks());
     }
 
     /** CLI 版单 step preflight 校验 —— 框架级 + handler 级。 */

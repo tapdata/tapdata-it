@@ -63,6 +63,14 @@ public class TmWaitTaskAction extends BaseStep {
         return "tm_wait_task";
     }
 
+    /** 建议超时 = wait_timeout_seconds + 60s 余量（task 轮询等待的内部上限）。 */
+    @Override
+    public int getRecommendedTimeoutSeconds(StepConfig config) {
+        Object raw = config.getInputs() == null ? null : config.getInputs().get("wait_timeout_seconds");
+        int waitTimeout = raw instanceof Number n ? n.intValue() : 300;
+        return waitTimeout + 60;
+    }
+
     @Override
     protected StepResult doExecute(StepConfig config, ScenarioContext ctx) throws Exception {
         TmTaskParameter p = config.getInputParameterConfig(TmTaskParameter.class);

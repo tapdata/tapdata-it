@@ -7,6 +7,7 @@ import io.tapdata.it.l3.plugin.step.BaseStep;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.HashMap;
 import java.util.Map;
 
 /**
@@ -59,7 +60,9 @@ public class DbforgeCreateDatabaseAction extends BaseStep {
 
         log.info("[DBForge] Creating lease: db_type={}, mode={}, topology={}", p.getDbType(), p.getMode(), p.getTopology());
 
+        long provisionStart = System.currentTimeMillis();
         DbforgeClient.LeaseResult lease = client.createLease(p.getDbType(), p.getMode(), p.getTopology());
+        long provisionTimeMs = System.currentTimeMillis() - provisionStart;
 
         if (!config.isKeepAlive()) {
             final String leaseId = lease.leaseId;
@@ -74,6 +77,8 @@ public class DbforgeCreateDatabaseAction extends BaseStep {
         }
 
         log.info("[DBForge] Lease created: id={}, jdbc_url={}", lease.leaseId, lease.jdbcUrl);
-        return success(lease.toMap());
+        Map<String, Object> outputs = new HashMap<>(lease.toMap());
+        outputs.put("provision_time_ms", provisionTimeMs);
+        return success(outputs);
     }
 }

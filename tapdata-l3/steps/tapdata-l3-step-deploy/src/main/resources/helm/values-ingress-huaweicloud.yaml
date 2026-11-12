@@ -1,0 +1,26 @@
+# Huawei Cloud CCE Ingress Configuration
+# This file is merged with values.yaml during helm install
+# Usage: helm install -f values.yaml -f values-ingress-huaweicloud.yaml ...
+
+ingress:
+  enabled: true
+  name: ""
+  className: cce
+  pathType: ImplementationSpecific
+  annotations:
+    kubernetes.io/elb.class: union
+    kubernetes.io/elb.port: '80'
+    kubernetes.io/elb.autocreate: |
+      {
+        "type": "public",
+        "bandwidth_name": "cce-bandwidth-elb",
+        "bandwidth_chargemode": "traffic",
+        "bandwidth_size": 5,
+        "bandwidth_sharetype": "PER",
+        "eip_type": "5_bgp"
+      }
+    kubernetes.io/elb.tags: "project=tapdata"
+  host: ""
+  tls: []
+  property:
+    ingress.beta.kubernetes.io/url-match-mode: STARTS_WITH

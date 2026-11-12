@@ -1,9 +1,12 @@
 # =============================================================================
-# L3 Golden Path — Local MySQL→MySQL via tapsupertest7
+# Dev Smoke — Local MySQL→MySQL via tapsupertest7
+# 仅供本地开发/调试框架用，不对应 wiki L3 编号，不纳入发布门禁。
+# L3 规格的 MySQL→PostgreSQL 黄金路径见 L3-F-01.yaml。
 # =============================================================================
 
-case_id: "L3-GP-MYSQL-LOCAL"
-scenario: "Golden Path — Local MySQL→MySQL via tapsupertest7"
+case_id: "IT-DEV-MYSQL-LOCAL"
+scenario: "Dev Smoke — Local MySQL→MySQL via tapsupertest7"
+group: "dev"
 description: "验证 MySQL→MySQL 全量同步 + CDC + TM VDC 校验 (用 tapsupertest7 agent + 本地 MySQL)"
 
 steps:

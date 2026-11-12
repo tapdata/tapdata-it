@@ -28,9 +28,11 @@ steps:
       message: "A=#{ #steps['echo_a'].outputs['echoed'] }, B=#{ #steps['echo_b'].outputs['echoed'] }"
 
   # === Test 3: Async timeout — sleep 30s but timeout is 2s ===
-  # Expected: StepTimeoutException caught, scenario marked failed
+  # expect_failure: 超时被抛出正是本 step 要验证的行为 → 失败视为通过（负向用例）
   - id: "should_timeout"
     action: "sleep"
     inputs:
       seconds: 30
     timeout_seconds: 2
+    expect_failure: true
+    expect_failure_message: "timed out"

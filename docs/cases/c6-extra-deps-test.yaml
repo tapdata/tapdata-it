@@ -30,7 +30,7 @@ steps:
     extra_deps:
       - "org.xerial:sqlite-jdbc:3.45.3.0"
     inputs:
-      jdbc_url: "jdbc:sqlite:/tmp/l3-c6-test.db"
+      jdbc_url: "jdbc:sqlite:/tmp/l3-c6-test-#{ #variables['run_id'] }.db"
       sql: |
         CREATE TABLE IF NOT EXISTS users (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,7 +50,7 @@ steps:
     extra_deps:
       - "org.xerial:sqlite-jdbc:3.45.3.0"
     inputs:
-      jdbc_url: "jdbc:sqlite:/tmp/l3-c6-test.db"
+      jdbc_url: "jdbc:sqlite:/tmp/l3-c6-test-#{ #variables['run_id'] }.db"
       sql: "SELECT COUNT(*) AS cnt FROM users"
       assert_mode: row_count_equals
       expected_count: 1
@@ -62,7 +62,7 @@ steps:
     extra_deps:
       - "org.xerial:sqlite-jdbc:3.45.3.0"
     inputs:
-      jdbc_url: "jdbc:sqlite:/tmp/l3-c6-test.db"
+      jdbc_url: "jdbc:sqlite:/tmp/l3-c6-test-#{ #variables['run_id'] }.db"
       sql: "SELECT COUNT(*) AS cnt FROM orders"
       assert_mode: row_count_equals
       expected_count: 1
@@ -74,7 +74,7 @@ steps:
     extra_deps:
       - "org.xerial:sqlite-jdbc:3.45.3.0"
     inputs:
-      jdbc_url: "jdbc:sqlite:/tmp/l3-c6-test.db"
+      jdbc_url: "jdbc:sqlite:/tmp/l3-c6-test-#{ #variables['run_id'] }.db"
       sql: "SELECT SUM(total) AS s FROM orders"
       assert_mode: value_equals
       column: s
@@ -84,4 +84,4 @@ steps:
   - id: done
     action: echo
     inputs:
-      message: "C6 extra_deps test complete ✅ SQLite DB at /tmp/l3-c6-test.db"
+      message: "C6 extra_deps test complete ✅ SQLite DB at /tmp/l3-c6-test-#{ #variables['run_id'] }.db"

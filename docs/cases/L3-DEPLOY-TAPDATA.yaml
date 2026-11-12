@@ -1,0 +1,39 @@
+case_id: "L3-DEPLOY-TAPDATA"
+scenario: "Deploy TapData Enterprise on remote K8s cluster"
+group: "functional"
+description: "Full TapData Helm deploy — prebuilt image from internal registry, external MongoDB (dbforge), deploy → scale → exec → undeploy"
+
+steps:
+  - id: "fetch_license"
+    action: "get_license"
+    inputs:
+      base_url: "http://192.168.1.184:18080"
+      username: "license-temp"
+      password: "Gotapd8!"
+      customer: "tapdata-it"
+      reason: "L3 deploy e2e test"
+      valid_days: 30
+      version: "4.23.0"
+      license_type: "OP"
+      engine_limit: 3
+    outputs: [license]
+    timeout_seconds: 60
+
+  - id: "deploy_tapdata"
+    action: "deploy_tapdata"
+    inputs:
+      host: "localhost"
+      prebuilt_image: "192.168.1.184:5001/tapdata/tapdata-enterprise:latest"
+      harbor_registry: "192.168.1.184:5001"
+      mongodb_uri: "mongodb://root:AbcDef123@mongo60-rs-headless.tapdata-db.svc.cluster.local:27017/tapdata?replicaSet=rs0&authSource=admin"
+      mongodb_hosts: "mongo60-rs-0.mongo60-rs-headless.tapdata-db.svc.cluster.local:27017,mongo60-rs-1.mongo60-rs-headless.tapdata-db.svc.cluster.local:27017,mongo60-rs-2.mongo60-rs-headless.tapdata-db.svc.cluster.local:27017"
+      mongodb_user: "root"
+      mongodb_password: "AbcDef123"
+      namespace: "tapdata-test"
+      server_replicas: 1
+      engine_replicas: 1
+      apiserver_replicas: 1
+      license_host: "192.168.1.184:18080"
+      license: "#{ #steps['fetch_license'].outputs['license'] }"
+    outputs: [namespace, helmRelease, image]
+    timeout_seconds: 900

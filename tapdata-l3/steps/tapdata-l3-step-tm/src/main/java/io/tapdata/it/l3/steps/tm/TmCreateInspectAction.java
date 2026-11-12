@@ -90,7 +90,7 @@ public class TmCreateInspectAction extends BaseStep {
 
         // Auto-cleanup
         if (!config.isKeepAlive() && inspectId != null) {
-            ctx.registerCleanup(() -> {
+            ctx.registerCleanup("tm", () -> {
                 try {
                     log.info("[TM] Auto-deleting Inspect {}", inspectId);
                     client.delete("/api/Inspects/" + inspectId);

@@ -77,6 +77,21 @@ public class TmTestConnectionAction extends BaseStep {
     }
 
     @Override
+    public int getRecommendedTimeoutSeconds(StepConfig config) {
+        Map<String, Object> inputs = config.getInputs();
+        if (inputs == null) return 45;
+        int waitTimeout = getInt(inputs, "wait_timeout_seconds", 20);
+        int count = 1;
+        Object idsObj = inputs.get("connection_ids");
+        if (idsObj instanceof List<?> list && !list.isEmpty()) count = list.size();
+        boolean parallel = getBool(inputs, "parallel", true);
+        if (parallel && count > 1) {
+            return waitTimeout + 45;
+        }
+        return count * (waitTimeout + 10) + 20;
+    }
+
+    @Override
     protected StepResult doExecute(StepConfig config, ScenarioContext ctx) throws Exception {
         Map<String, Object> inputs = config.getInputs();
 

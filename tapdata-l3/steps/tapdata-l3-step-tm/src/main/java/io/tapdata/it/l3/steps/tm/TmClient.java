@@ -39,6 +39,18 @@ public class TmClient {
     private static final Logger log = LoggerFactory.getLogger(TmClient.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final long REFRESH_BUFFER_MS = 60_000L;
+    /** 网关错误 (502/503/504) 重试次数与间隔 — 覆盖多 TM 节点滚动重启的瞬时不就绪。 */
+    private static final int GATEWAY_RETRY_MAX = 12;
+    private static final long GATEWAY_RETRY_INTERVAL_MS = 5_000L;
+    /**
+     * 连续网关错误熔断阈值（≈ 一轮完整重试的尝试次数）。达到后所有请求立即失败，
+     * 不再逐个耗尽 12×5s 重试 — 典型场景：undeploy 后清理钩子对已消失的 TM 资源逐个重试，
+     * 熔断把清理风暴从 ~8min 降到 ~1min。
+     */
+    private static final int GATEWAY_BREAKER_THRESHOLD = GATEWAY_RETRY_MAX;
+    /** 连续网关错误计数 — 任一请求成功即清零。 */
+    private final java.util.concurrent.atomic.AtomicInteger consecutiveGatewayFailures =
+            new java.util.concurrent.atomic.AtomicInteger();
 
     /** Default TM for L3 IT environments — can be overridden via config/env/property. */
     private static final String DEFAULT_URL = "http://192.168.1.190:24021";
@@ -126,20 +138,42 @@ public class TmClient {
         if (c != null && c.expiresAt - now > REFRESH_BUFFER_MS) {
             return c.token;
         }
-        try {
-            Map<String, Object> body = Map.of("accesscode", accessCode);
-            JsonNode resp = postRaw("/api/users/generatetoken", null, body);
-            JsonNode data = resp.get("data");
-            String token = data.get("id").asText();
-            long ttlSeconds = data.has("ttl") ? data.get("ttl").asLong() : 1209600;
-            long createdMs = System.currentTimeMillis();
-            long expiresAt = createdMs + ttlSeconds * 1000L;
-            cached.set(new CachedToken(token, expiresAt));
-            log.info("[TM] Token acquired, ttl={}s, expiresIn={}min", ttlSeconds, (expiresAt - createdMs) / 60000);
-            return token;
-        } catch (Exception e) {
-            throw new IllegalStateException("TM token refresh failed: " + e.getMessage(), e);
+        Exception lastError = null;
+        for (int attempt = 1; attempt <= GATEWAY_RETRY_MAX; attempt++) {
+            try {
+                Map<String, Object> body = Map.of("accesscode", accessCode);
+                JsonNode resp = postRaw("/api/users/generatetoken", null, body);
+                JsonNode data = resp.get("data");
+                String token = data.get("id").asText();
+                long ttlSeconds = data.has("ttl") ? data.get("ttl").asLong() : 1209600;
+                long createdMs = System.currentTimeMillis();
+                long expiresAt = createdMs + ttlSeconds * 1000L;
+                cached.set(new CachedToken(token, expiresAt));
+                consecutiveGatewayFailures.set(0);
+                log.info("[TM] Token acquired, ttl={}s, expiresIn={}min", ttlSeconds, (expiresAt - createdMs) / 60000);
+                return token;
+            } catch (Exception e) {
+                lastError = e;
+                String msg = e.getMessage() != null ? e.getMessage() : "";
+                boolean gateway = msg.contains("HTTP 502") || msg.contains("HTTP 503") || msg.contains("HTTP 504");
+                if (!gateway || attempt == GATEWAY_RETRY_MAX) {
+                    break;
+                }
+                int failures = consecutiveGatewayFailures.incrementAndGet();
+                if (failures >= GATEWAY_BREAKER_THRESHOLD) {
+                    log.warn("[TM] generatetoken — circuit breaker open after {} consecutive gateway errors, fail fast", failures);
+                    break;
+                }
+                log.warn("[TM] generatetoken gateway error (attempt {}/{}), retrying in {}ms", attempt, GATEWAY_RETRY_MAX, GATEWAY_RETRY_INTERVAL_MS);
+                try {
+                    Thread.sleep(GATEWAY_RETRY_INTERVAL_MS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
         }
+        throw new IllegalStateException("TM token refresh failed: " + (lastError != null ? lastError.getMessage() : "unknown"), lastError);
     }
 
     public String getBaseUrl() {
@@ -217,8 +251,51 @@ public class TmClient {
 
     // ==================== Internal ====================
 
-    /** Send request, parse TM ResponseMessage, throw on non-ok code. */
+    /**
+     * Send request, parse TM ResponseMessage, throw on non-ok code.
+     * 对 502/503/504 做有限重试 — 多 TM 节点滚动重启期间，NodePort 可能短暂命中未就绪节点。
+     */
     private JsonNode send(String method, String path, Map<String, Object> queryParams, Object body)
+            throws IOException, InterruptedException {
+        IOException lastError = null;
+        for (int attempt = 1; attempt <= GATEWAY_RETRY_MAX; attempt++) {
+            try {
+                JsonNode result = sendOnce(method, path, queryParams, body);
+                consecutiveGatewayFailures.set(0);
+                return result;
+            } catch (NotLoginException e) {
+                // 多 TM 节点下 token 可能被某节点拒绝（刚扩容的节点元数据未同步等）— 强制刷新 token 重试
+                if (attempt == GATEWAY_RETRY_MAX) {
+                    throw e;
+                }
+                lastError = e;
+                cached.set(null);
+                log.warn("[TM] {} {} → not-login (attempt {}/{}), refreshing token and retrying in {}ms",
+                        method, path, attempt, GATEWAY_RETRY_MAX, GATEWAY_RETRY_INTERVAL_MS);
+                Thread.sleep(GATEWAY_RETRY_INTERVAL_MS);
+            } catch (IOException e) {
+                if (!isGatewayError(e) || attempt == GATEWAY_RETRY_MAX) {
+                    throw e;
+                }
+                lastError = e;
+                // 熔断：连续网关错误达到阈值 → TM 整体不可用（环境已被卸载/宕机），
+                // 不再逐请求耗尽重试。首个请求仍会走完一轮重试（60s），后续请求立即失败。
+                int failures = consecutiveGatewayFailures.incrementAndGet();
+                if (failures >= GATEWAY_BREAKER_THRESHOLD) {
+                    log.warn("[TM] {} {} → circuit breaker open after {} consecutive gateway errors, fail fast",
+                            method, path, failures);
+                    throw new GatewayException("TM gateway down — " + failures
+                            + " consecutive gateway errors (circuit breaker open): " + e.getMessage());
+                }
+                log.warn("[TM] {} {} → gateway error (attempt {}/{}), retrying in {}ms: {}",
+                        method, path, attempt, GATEWAY_RETRY_MAX, GATEWAY_RETRY_INTERVAL_MS, e.getMessage());
+                Thread.sleep(GATEWAY_RETRY_INTERVAL_MS);
+            }
+        }
+        throw lastError != null ? lastError : new IOException("TM request failed: " + method + " " + path);
+    }
+
+    private JsonNode sendOnce(String method, String path, Map<String, Object> queryParams, Object body)
             throws IOException, InterruptedException {
         String token = getToken();
         String url = buildUrl(path, token, queryParams);
@@ -243,17 +320,44 @@ public class TmClient {
 
         log.debug("[TM] <<< {} {} → {} body={}", method, url, resp.statusCode(), resp.body().length() > 300 ? resp.body().substring(0, 300) + "..." : resp.body());
 
+        if (resp.statusCode() == 502 || resp.statusCode() == 503 || resp.statusCode() == 504) {
+            throw new GatewayException("TM HTTP " + resp.statusCode() + " on " + url + ": " + resp.body());
+        }
+        if (resp.statusCode() == 401) {
+            throw new NotLoginException("TM HTTP 401 on " + url + ": " + resp.body());
+        }
         if (resp.statusCode() >= 300) {
             throw new IOException("TM HTTP " + resp.statusCode() + " on " + url + ": " + resp.body());
         }
 
         JsonNode root = MAPPER.readTree(resp.body());
         String code = root.has("code") ? root.get("code").asText() : "";
+        if ("NotLogin".equals(code)) {
+            throw new NotLoginException("TM API NotLogin on " + path + ": " + resp.body());
+        }
         if (!"ok".equals(code)) {
             String msg = root.has("message") ? root.get("message").asText() : resp.body();
             throw new IOException("TM API error on " + path + ": code=" + code + ", message=" + msg);
         }
         return root.has("data") ? root.get("data") : root;
+    }
+
+    private static boolean isGatewayError(IOException e) {
+        return e instanceof GatewayException;
+    }
+
+    /** 网关类错误（上游未就绪），可重试。 */
+    private static class GatewayException extends IOException {
+        GatewayException(String message) {
+            super(message);
+        }
+    }
+
+    /** 401 / NotLogin — token 被某节点拒绝，清缓存刷新后可重试。 */
+    private static class NotLoginException extends IOException {
+        NotLoginException(String message) {
+            super(message);
+        }
     }
 
     /** Raw POST that doesn't parse ResponseMessage — used for token refresh (needs full response). */

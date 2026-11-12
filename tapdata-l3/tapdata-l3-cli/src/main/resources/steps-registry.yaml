@@ -31,6 +31,9 @@ tm_delete_task: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
 tm_create_inspect: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
 tm_execute_inspect: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
 tm_assert_inspect_result: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
+tm_get_task_engine: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
+tm_wait_task_failover: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
+tm_update_setting: "io.tapdata.it.l3:tapdata-l3-step-tm:1.0.0-SNAPSHOT"
 
 # --- Assert-JDBC step 家族 ---
 assert_jdbc_data: "io.tapdata.it.l3:tapdata-l3-step-assert-jdbc:1.0.0-SNAPSHOT"
@@ -38,5 +41,13 @@ assert_jdbc_data: "io.tapdata.it.l3:tapdata-l3-step-assert-jdbc:1.0.0-SNAPSHOT"
 # --- JDBC Operations step 家族 ---
 jdbc_init_source: "io.tapdata.it.l3:tapdata-l3-step-jdbc:1.0.0-SNAPSHOT"
 jdbc_write_incremental: "io.tapdata.it.l3:tapdata-l3-step-jdbc:1.0.0-SNAPSHOT"
+
+# --- TapData K8s Deploy step 家族 ---
+deploy_tapdata: "io.tapdata.it.l3:tapdata-l3-step-deploy:1.0.0-SNAPSHOT"
+undeploy_tapdata: "io.tapdata.it.l3:tapdata-l3-step-deploy:1.0.0-SNAPSHOT"
+scale: "io.tapdata.it.l3:tapdata-l3-step-deploy:1.0.0-SNAPSHOT"
+exec: "io.tapdata.it.l3:tapdata-l3-step-deploy:1.0.0-SNAPSHOT"
+kubectl: "io.tapdata.it.l3:tapdata-l3-step-deploy:1.0.0-SNAPSHOT"
+get_license: "io.tapdata.it.l3:tapdata-l3-step-deploy:1.0.0-SNAPSHOT"
 
 # 注意：echo / sleep 是 tapdata-l3-core 内置 step（不需要外置加载）

@@ -95,6 +95,22 @@ public interface ActionHandler {
     }
 
     /**
+     * 建议超时下限（秒）— handler 根据 DSL inputs 里的内部等待参数计算
+     * （如 {@code wait_timeout_seconds}：handler 内部会轮询等待这么久，外层超时若更小必然假失败）。
+     * <p>
+     * BaseStep 解析规则：
+     * <ul>
+     *   <li>用户 {@code timeout_seconds} &gt; 0 且 &lt; 建议值 → 自动提升到建议值并 WARN</li>
+     *   <li>用户未设置 → 直接用建议值</li>
+     *   <li>建议值 &le; 0 → 框架默认 60s</li>
+     * </ul>
+     * 返回 0 表示无建议（默认）。
+     */
+    default int getRecommendedTimeoutSeconds(StepConfig config) {
+        return 0;
+    }
+
+    /**
      * 实例创建后立即调用 — 只执行一次。
      * 适合做"不需要 DSL 配置"的初始化（比如打开长期连接、缓存客户端）。
      * <p>

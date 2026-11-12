@@ -28,14 +28,40 @@ public class ScenarioContext {
     /** Safe SpEL evaluator — shared instance per context. */
     private final SafeSpelEvaluator evaluator;
 
-    /** Cleanup stack — populated by steps that allocate resources. */
-    private final Deque<Runnable> cleanupStack = new java.util.ArrayDeque<>();
+    /** Cleanup stack — populated by steps that allocate resources. Entries may carry a tag. */
+    private final Deque<CleanupEntry> cleanupStack = new java.util.ArrayDeque<>();
+
+    /** Scenario env map — exposed to SpEL as {@code #env['KEY']}. */
+    private volatile Map<String, Object> env = Map.of();
 
     public ScenarioContext() {
         variables.put("timestamp", System.currentTimeMillis());
         variables.put("uuid", java.util.UUID.randomUUID().toString());
+        // Per-run unique suffix (10 digits, e.g. 1111104231) — used by DSL to build unique
+        // db/connection/task names and avoid collisions with leftovers from previous runs.
+        variables.put("run_id", java.time.LocalDateTime.now()
+                .format(java.time.format.DateTimeFormatter.ofPattern("MMddHHmmss")));
         // Evaluator needs both: wrapped for SpEL navigation (.outputs property), raw for null-safety validation
         this.evaluator = new SafeSpelEvaluator(variables, stepsWrapped, stepsRaw);
+    }
+
+    /**
+     * Register the scenario env map so SpEL can access it as {@code #env['KEY']}.
+     * Called by ScenarioRunner before steps execute. Also keeps {@code #variables['env']}
+     * working for legacy expressions.
+     */
+    public void setEnv(Map<String, String> envMap) {
+        Map<String, Object> merged = new java.util.LinkedHashMap<>();
+        if (envMap != null) merged.putAll(envMap);
+        this.env = java.util.Collections.unmodifiableMap(merged);
+        evaluator.registerEnv(this.env);
+        // keep legacy access path #{ #variables['env']['KEY'] } working
+        variables.put("env", new java.util.HashMap<>(merged));
+    }
+
+    /** Scenario env map (read-only view). */
+    public Map<String, Object> getEnv() {
+        return env;
     }
 
     // ==================== Variables ====================
@@ -46,6 +72,14 @@ public class ScenarioContext {
 
     public Object getVariable(String name) {
         return variables.get(name);
+    }
+
+    public boolean hasVariable(String name) {
+        return variables.containsKey(name);
+    }
+
+    public void removeVariable(String name) {
+        variables.remove(name);
     }
 
     public Map<String, Object> getVariables() {
@@ -105,8 +139,15 @@ public class ScenarioContext {
         return result;
     }
 
+    /**
+     * Recursively evaluate SpEL expressions inside any value (String / Map / List).
+     * Non-expression values are returned unchanged.
+     * <p>
+     * Exposed so control-flow blocks ({@code if} / {@code for} / {@code switch}) can
+     * evaluate their conditions and iteration sources with the same semantics as step inputs.
+     */
     @SuppressWarnings("unchecked")
-    private Object evaluateValue(Object value) {
+    public Object evaluateValue(Object value) {
         if (value == null) return null;
         if (value instanceof String) {
             String s = (String) value;
@@ -129,11 +170,39 @@ public class ScenarioContext {
 
     // ==================== Cleanup Stack ====================
 
+    /** Tagged cleanup entry — tags let later steps (e.g. undeploy_tapdata) cancel pending cleanups. */
+    public record CleanupEntry(String tag, Runnable action) {}
+
     public void registerCleanup(Runnable action) {
-        cleanupStack.push(action);
+        registerCleanup(null, action);
     }
 
-    public Deque<Runnable> getCleanupStack() {
+    /** Register a cleanup hook with a tag (e.g. "tm" for TM resources, "k8s" for deployments). */
+    public void registerCleanup(String tag, Runnable action) {
+        cleanupStack.push(new CleanupEntry(tag, action));
+    }
+
+    /**
+     * Remove all pending cleanup hooks carrying the given tag (they will NOT run).
+     * Used when a step intentionally tears down the environment those resources belong to
+     * (e.g. undeploy_tapdata removing the TM env that pending tm_* cleanups target).
+     *
+     * @return number of cancelled hooks
+     */
+    public synchronized int unregisterCleanups(String tag) {
+        int removed = 0;
+        java.util.Iterator<CleanupEntry> it = cleanupStack.iterator();
+        while (it.hasNext()) {
+            CleanupEntry e = it.next();
+            if (tag != null && tag.equals(e.tag())) {
+                it.remove();
+                removed++;
+            }
+        }
+        return removed;
+    }
+
+    public Deque<CleanupEntry> getCleanupStack() {
         return cleanupStack;
     }
 }

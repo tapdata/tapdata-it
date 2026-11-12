@@ -1,8 +1,12 @@
 package io.tapdata.it.l3.core.dsl;
 
+import io.tapdata.it.l3.common.ForBlock;
+import io.tapdata.it.l3.common.IfBlock;
 import io.tapdata.it.l3.common.ParallelBlock;
 import io.tapdata.it.l3.common.ScenarioConfig;
 import io.tapdata.it.l3.common.StepConfig;
+import io.tapdata.it.l3.common.SwitchBlock;
+import io.tapdata.it.l3.common.WhileBlock;
 import io.tapdata.it.l3.common.exception.DslParseException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -20,17 +24,21 @@ import java.util.regex.Pattern;
 /**
  * DSL YAML → ScenarioConfig parser.
  * <p>
- * Handles three step-level DSL constructs:
+ * Handles the following block-level DSL constructs:
  * <ul>
  *   <li>Sequential step: {@code - id: ... action: ... inputs: ...}</li>
  *   <li>Parallel block: {@code - parallel: [ ... ]}</li>
+ *   <li>Conditional block: {@code - if: { condition, then, else }}</li>
+ *   <li>Loop block: {@code - for: { var, index_var, items, steps }}</li>
+ *   <li>Conditional loop: {@code - while: { condition, index_var, max_iterations, steps }}</li>
+ *   <li>Branch block: {@code - switch: { expression, cases, default }}</li>
  * </ul>
- * Foreach (C2) and other control structures are added incrementally.
+ * Control-flow blocks nest recursively (e.g. an {@code if} inside a {@code for}).
  * <p>
  * Performs the following validations during parsing:
  * <ol>
  *   <li>Required fields present (case_id, at least one step)</li>
- *   <li>Step ids are unique within a scenario</li>
+ *   <li>Step ids are unique within a scenario (including nested control-flow blocks)</li>
  *   <li>Parallel block independence — steps inside same block must NOT cross-reference outputs</li>
  * </ol>
  */
@@ -58,7 +66,7 @@ public class DslParser {
     // ==================== Public API ====================
 
     public ScenarioConfig parse(Path yamlFile) {
-        log.info("[DSL] Parsing {}", yamlFile);
+        log.debug("[DSL] Parsing {}", yamlFile);
         try (InputStream is = Files.newInputStream(yamlFile)) {
             @SuppressWarnings("unchecked")
             Map<String, Object> root = yaml.load(is);
@@ -98,26 +106,68 @@ public class DslParser {
      * 现在只做 per-file safe parse，每个文件独立 try-catch。
      */
     public List<ScenarioConfig> parseDirectorySafe(Path dir) {
-        List<ScenarioConfig> result = new ArrayList<>();
-        try (var stream = Files.list(dir)) {
-            List<Path> files = stream
-                    .filter(p -> p.toString().endsWith(".yaml") || p.toString().endsWith(".yml"))
-                    .sorted(Comparator.comparing(p -> p.getFileName().toString()))
-                    .toList();
-            if (files.isEmpty()) {
-                log.warn("[DSL] No .yaml/.yml files found in {}", dir);
-            }
-            for (Path f : files) {
-                try {
-                    result.add(parse(f));
-                } catch (DslParseException e) {
-                    log.warn("[DSL] Skipping {}: {}", f.getFileName(), e.getMessage());
-                }
-            }
-        } catch (IOException e) {
-            log.warn("[DSL] Failed to scan directory {}: {}", dir, e.getMessage());
+        return parseDirectoryDetailed(dir, false).scenarios();
+    }
+
+    /**
+     * Detailed safe parse — files that fail to parse are recorded (not silently dropped),
+     * duplicate case_ids are skipped, and subdirectories can be included.
+     * <p>
+     * Used by the CLI: {@code run} treats skipped files as warnings,
+     * {@code validate} treats them as errors (a skipped case silently reduces coverage).
+     *
+     * @param dir       directory containing .yaml/.yml case files
+     * @param recursive true → also scan subdirectories (sorted by relative path)
+     */
+    public ParseOutcome parseDirectoryDetailed(Path dir, boolean recursive) {
+        if (!Files.isDirectory(dir)) {
+            throw new DslParseException("Not a directory: " + dir);
         }
-        return result;
+        List<ScenarioConfig> scenarios = new ArrayList<>();
+        List<SkippedFile> skipped = new ArrayList<>();
+        Set<String> seenCaseIds = new HashSet<>();
+
+        List<Path> files;
+        try (var walk = recursive ? Files.walk(dir) : Files.list(dir)) {
+            files = walk
+                    .filter(p -> !p.equals(dir))
+                    .filter(Files::isRegularFile)
+                    .filter(p -> p.toString().endsWith(".yaml") || p.toString().endsWith(".yml"))
+                    .sorted(Comparator.comparing(p -> p.toString()))
+                    .toList();
+        } catch (IOException e) {
+            throw new DslParseException("Failed to scan directory: " + dir, e);
+        }
+        if (files.isEmpty()) {
+            log.warn("[DSL] No .yaml/.yml files found in {} (recursive={})", dir, recursive);
+        }
+        for (Path f : files) {
+            try {
+                ScenarioConfig scenario = parse(f);
+                if (!seenCaseIds.add(scenario.getCaseId())) {
+                    skipped.add(new SkippedFile(f, "duplicate case_id '" + scenario.getCaseId()
+                            + "' (first occurrence wins)"));
+                    log.warn("[DSL] Skipping {}: duplicate case_id '{}'", f, scenario.getCaseId());
+                    continue;
+                }
+                scenarios.add(scenario);
+            } catch (DslParseException e) {
+                skipped.add(new SkippedFile(f, e.getMessage()));
+                log.warn("[DSL] Skipping {}: {}", f.getFileName(), e.getMessage());
+            }
+        }
+        return new ParseOutcome(scenarios, skipped);
+    }
+
+    /** Result of {@link #parseDirectoryDetailed(Path, boolean)}. */
+    public record ParseOutcome(List<ScenarioConfig> scenarios, List<SkippedFile> skipped) {}
+
+    /** A .yaml file that was skipped during directory parsing, with the reason. */
+    public record SkippedFile(Path file, String reason) {
+        @Override
+        public String toString() {
+            return file.getFileName() + ": " + reason;
+        }
     }
 
     // ==================== Root parsing ====================
@@ -149,19 +199,7 @@ public class DslParser {
         Set<String> seenIds = new HashSet<>();
 
         for (Object item : stepList) {
-            if (item instanceof Map<?, ?> itemMap) {
-                // Detect parallel block vs sequential step
-                if (itemMap.containsKey("parallel")) {
-                    ParallelBlock block = parseParallelBlock(itemMap, caseId, seenIds);
-                    blocks.add(block);
-                } else {
-                    StepConfig step = parseStep((Map<String, Object>) itemMap, caseId, seenIds);
-                    blocks.add(step);
-                }
-            } else {
-                throw new DslParseException(String.format(
-                        "Scenario '%s': step item must be a YAML mapping, got: %s", caseId, item));
-            }
+            blocks.add(parseBlock(item, caseId, seenIds));
         }
 
         return ScenarioConfig.builder()
@@ -188,10 +226,172 @@ public class DslParser {
             result.put(key, val);
         }
         if (!result.isEmpty()) {
-            log.info("[DSL] Scenario '{}': parsed {} env variable(s) — will be injected into System Properties + SpEL context",
+            log.debug("[DSL] Scenario '{}': parsed {} env variable(s) — will be injected into System Properties + SpEL context",
                     caseId, result.size());
         }
         return result;
+    }
+
+    // ==================== Block dispatch ====================
+
+    /** Parses one block item — detects parallel / if / for / switch, otherwise a sequential step. */
+    @SuppressWarnings("unchecked")
+    private Object parseBlock(Object item, String caseId, Set<String> seenIds) {
+        if (!(item instanceof Map<?, ?> itemMap)) {
+            throw new DslParseException(String.format(
+                    "Scenario '%s': step item must be a YAML mapping, got: %s", caseId, item));
+        }
+        if (itemMap.containsKey("parallel")) {
+            return parseParallelBlock(itemMap, caseId, seenIds);
+        }
+        if (itemMap.containsKey("if")) {
+            return parseIfBlock(itemMap, caseId, seenIds);
+        }
+        if (itemMap.containsKey("for")) {
+            return parseForBlock(itemMap, caseId, seenIds);
+        }
+        if (itemMap.containsKey("while")) {
+            return parseWhileBlock(itemMap, caseId, seenIds);
+        }
+        if (itemMap.containsKey("switch")) {
+            return parseSwitchBlock(itemMap, caseId, seenIds);
+        }
+        return parseStep((Map<String, Object>) itemMap, caseId, seenIds);
+    }
+
+    /** Parses a nested YAML list into blocks. {@code raw} must be a list. */
+    @SuppressWarnings("unchecked")
+    private List<Object> parseBlocks(Object raw, String caseId, Set<String> seenIds,
+                                     String fieldName, String blockName) {
+        if (!(raw instanceof List<?> rawList) || rawList.isEmpty()) {
+            throw new DslParseException(String.format(
+                    "Scenario '%s': '%s.%s' must be a non-empty list", caseId, blockName, fieldName));
+        }
+        List<Object> blocks = new ArrayList<>();
+        for (Object item : rawList) {
+            blocks.add(parseBlock(item, caseId, seenIds));
+        }
+        return blocks;
+    }
+
+    // ==================== Control-flow block parsing ====================
+
+    /** Parses {@code - if: { condition, then, else } }. */
+    private IfBlock parseIfBlock(Map<?, ?> itemMap, String caseId, Set<String> seenIds) {
+        Object raw = itemMap.get("if");
+        if (!(raw instanceof Map<?, ?> ifMap)) {
+            throw new DslParseException(String.format(
+                    "Scenario '%s': 'if:' must be followed by a mapping with 'condition' and 'then'", caseId));
+        }
+        Object condition = ifMap.get("condition");
+        if (condition == null || condition.toString().isBlank()) {
+            throw new DslParseException(String.format(
+                    "Scenario '%s': 'if.condition' is required", caseId));
+        }
+        List<Object> thenBlocks = parseBlocks(ifMap.get("then"), caseId, seenIds, "then", "if");
+        List<Object> elseBlocks = ifMap.containsKey("else")
+                ? parseBlocks(ifMap.get("else"), caseId, seenIds, "else", "if")
+                : List.of();
+        return IfBlock.builder()
+                .condition(condition)
+                .thenBlocks(thenBlocks)
+                .elseBlocks(elseBlocks)
+                .build();
+    }
+
+    /** Parses {@code - for: { var, index_var, items, steps } }. */
+    @SuppressWarnings("unchecked")
+    private ForBlock parseForBlock(Map<?, ?> itemMap, String caseId, Set<String> seenIds) {
+        Object raw = itemMap.get("for");
+        if (!(raw instanceof Map<?, ?> forMap)) {
+            throw new DslParseException(String.format(
+                    "Scenario '%s': 'for:' must be followed by a mapping with 'var', 'items' and 'steps'", caseId));
+        }
+        String var = requiredString((Map<String, Object>) forMap, "var", caseId);
+        String indexVar = optionalString((Map<String, Object>) forMap, "index_var", null);
+
+        Object items = forMap.get("items");
+        if (items == null) {
+            throw new DslParseException(String.format(
+                    "Scenario '%s': 'for.items' is required (list literal or SpEL expression)", caseId));
+        }
+        List<Object> blocks = parseBlocks(forMap.get("steps"), caseId, seenIds, "steps", "for");
+
+        return ForBlock.builder()
+                .var(var)
+                .indexVar(indexVar)
+                .items(items)
+                .blocks(blocks)
+                .build();
+    }
+
+    /** Parses {@code - while: { condition, index_var, max_iterations, steps } }. */
+    @SuppressWarnings("unchecked")
+    private WhileBlock parseWhileBlock(Map<?, ?> itemMap, String caseId, Set<String> seenIds) {
+        Object raw = itemMap.get("while");
+        if (!(raw instanceof Map<?, ?> whileMap)) {
+            throw new DslParseException(String.format(
+                    "Scenario '%s': 'while:' must be followed by a mapping with 'condition' and 'steps'", caseId));
+        }
+        Object condition = whileMap.get("condition");
+        if (condition == null || condition.toString().isBlank()) {
+            throw new DslParseException(String.format(
+                    "Scenario '%s': 'while.condition' is required", caseId));
+        }
+        String indexVar = optionalString((Map<String, Object>) whileMap, "index_var", null);
+
+        int maxIterations = WhileBlock.DEFAULT_MAX_ITERATIONS;
+        Object maxRaw = whileMap.get("max_iterations");
+        if (maxRaw != null) {
+            if (!(maxRaw instanceof Number number) || number.intValue() <= 0) {
+                throw new DslParseException(String.format(
+                        "Scenario '%s': 'while.max_iterations' must be a positive integer, got: %s", caseId, maxRaw));
+            }
+            maxIterations = number.intValue();
+        }
+
+        List<Object> blocks = parseBlocks(whileMap.get("steps"), caseId, seenIds, "steps", "while");
+        return WhileBlock.builder()
+                .condition(condition)
+                .indexVar(indexVar)
+                .maxIterations(maxIterations)
+                .blocks(blocks)
+                .build();
+    }
+
+    /** Parses {@code - switch: { expression, cases, default } }. */
+    private SwitchBlock parseSwitchBlock(Map<?, ?> itemMap, String caseId, Set<String> seenIds) {
+        Object raw = itemMap.get("switch");
+        if (!(raw instanceof Map<?, ?> switchMap)) {
+            throw new DslParseException(String.format(
+                    "Scenario '%s': 'switch:' must be followed by a mapping with 'expression' and 'cases'", caseId));
+        }
+        Object expression = switchMap.get("expression");
+        if (expression == null || expression.toString().isBlank()) {
+            throw new DslParseException(String.format(
+                    "Scenario '%s': 'switch.expression' is required", caseId));
+        }
+        Object casesRaw = switchMap.get("cases");
+        if (!(casesRaw instanceof Map<?, ?> casesMap) || casesMap.isEmpty()) {
+            throw new DslParseException(String.format(
+                    "Scenario '%s': 'switch.cases' must be a non-empty mapping", caseId));
+        }
+
+        Map<String, List<Object>> cases = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : casesMap.entrySet()) {
+            String key = String.valueOf(entry.getKey());
+            cases.put(key, parseBlocks(entry.getValue(), caseId, seenIds,
+                    "cases." + key, "switch"));
+        }
+        List<Object> defaultBlocks = switchMap.containsKey("default")
+                ? parseBlocks(switchMap.get("default"), caseId, seenIds, "default", "switch")
+                : List.of();
+
+        return SwitchBlock.builder()
+                .expression(expression)
+                .cases(cases)
+                .defaultBlocks(defaultBlocks)
+                .build();
     }
 
     // ==================== Step parsing ====================
@@ -221,6 +421,13 @@ public class DslParser {
         boolean keepAlive = false;
         Object keepAliveRaw = map.get("keep_alive");
         if (keepAliveRaw instanceof Boolean b) keepAlive = b;
+
+        // expect_failure — 负向用例：step 失败视为通过（可选 expect_failure_message 做子串断言）
+        boolean expectFailure = false;
+        Object expectFailureRaw = map.get("expect_failure");
+        if (expectFailureRaw instanceof Boolean eb) expectFailure = eb;
+        else if (expectFailureRaw != null) expectFailure = Boolean.parseBoolean(expectFailureRaw.toString());
+        String expectFailureMessage = optionalString(map, "expect_failure_message", null);
 
         // Lifecycle hooks — reserved for future execution engine
         @SuppressWarnings("unchecked")
@@ -264,6 +471,8 @@ public class DslParser {
                 .outputs(outputs)
                 .timeoutSeconds(timeoutSeconds)
                 .keepAlive(keepAlive)
+                .expectFailure(expectFailure)
+                .expectFailureMessage(expectFailureMessage)
                 .hooks(hooks)
                 .extraDeps(extraDeps)
                 .use(use)

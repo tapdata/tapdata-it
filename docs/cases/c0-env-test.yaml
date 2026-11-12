@@ -25,8 +25,9 @@ steps:
     outputs: [tm_token, tm_base_url]
 
   # Step 2 — 验证 env 也能在 SpEL 里引用 (两种访问方式: #env / #variables)
+  # 注意: SafeSpelEvaluator 基于 SimpleEvaluationContext 沙箱，不支持 .substring() 等方法调用
   - id: echo_env_vars
     action: echo
     timeout_seconds: 10
     inputs:
-      message: "#{ 'SpEL #env: TM_BASE_URL=' + #env['TM_BASE_URL'] + ' | #variables: DB_TYPE=' + #variables['DB_TYPE'] + ' | both keys merged: ' + #env['AGENT_ID'].substring(0,8) }"
+      message: "#{ 'SpEL #env: TM_BASE_URL=' + #env['TM_BASE_URL'] + ' | #variables: DB_TYPE=' + #variables['DB_TYPE'] + ' | both keys merged: ' + #env['AGENT_ID'] }"

@@ -1,0 +1,15 @@
+dependencies:
+- name: mongodb
+  repository: file://charts/mongodb
+  version: 1.0.0
+- name: tapdata-server
+  repository: file://charts/tapdata-server
+  version: 1.0.0
+- name: tapdata-engine
+  repository: file://charts/tapdata-engine
+  version: 1.0.0
+- name: tapdata-apiserver
+  repository: file://charts/tapdata-apiserver
+  version: 1.0.0
+digest: sha256:12539d7b6935af106ab797b1c9221dbe209109a0643e0ba4990ebcae75c3aa2c
+generated: "2026-05-13T16:51:53.081817+08:00"

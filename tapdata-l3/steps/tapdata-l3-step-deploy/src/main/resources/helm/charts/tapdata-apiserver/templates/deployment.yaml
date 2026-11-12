@@ -1,0 +1,123 @@
+{{- if .Values.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "tapdata-apiserver.fullname" . }}
+  labels:
+    {{- include "tapdata-apiserver.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "tapdata-apiserver.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "tapdata-apiserver.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- if .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml .Values.global.imagePullSecrets | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if hasKey .Values "initContainers" }}
+      {{- with .Values.initContainers }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- else }}
+      initContainers:
+        - name: wait-for-tapdata-server
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              URL="{{ .Values.env.backendUrl }}"
+              STRIP_PROTO=${URL#http://}
+              STRIP_PROTO=${STRIP_PROTO#https://}
+              STRIP_PATH=${STRIP_PROTO%%/*}
+              HOST=${STRIP_PATH%%:*}
+              PORT=${STRIP_PATH##*:}
+              echo "Waiting for TapData Server (${HOST}:${PORT}) to be available..."
+              until nc -z -w 3 ${HOST} ${PORT}; do
+                echo "TapData Server is not available yet, retrying in 5 seconds..."
+                sleep 5
+              done
+              echo "TapData Server is available, starting TapData ApiServer..."
+      {{- end }}
+      containers:
+        - name: tapdata-apiserver
+          image: {{ include "tapdata-apiserver.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 3080
+              protocol: TCP
+          env:
+            - name: MODULE
+              value: "{{ .Values.env.module }}"
+            - name: MONGODB_CONNECTION_STRING
+              value: "{{ .Values.global.mongodb.hosts }}/{{ .Values.global.mongodb.database }}?authSource={{ .Values.global.mongodb.authSource }}"
+            - name: MONGODB_USER
+              value: "{{ .Values.global.mongodb.user }}"
+            - name: MONGODB_PASSWORD
+              value: "{{ .Values.global.mongodb.password }}"
+            - name: BACKENDURL
+              value: "{{ .Values.env.backendUrl }}"
+            - name: JAVA_VERSION
+              value: "{{ .Values.env.javaVersion }}"
+            - name: TZ
+              value: "{{ .Values.env.tz }}"
+            - name: LICENSE_HOST
+              value: "{{ .Values.env.licenseHost }}"
+            - name: TAPDATA_WORK_DIR
+              value: "/tapdata/apps"
+          # 启动探针 —— ApiServer 同样依赖 TM 可达 + Java 冷启动，慢启动不应被 liveness 误杀。
+          {{- if .Values.startupProbe.enabled }}
+          startupProbe:
+            {{- omit .Values.startupProbe "enabled" | toYaml | nindent 12 }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 240
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 8
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /tmp/conf
+            - name: logs
+              mountPath: /tapdata/apps/logs
+          command:
+            - /tapdata/docker-entrypoint.sh
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "tapdata-apiserver.fullname" . }}-config
+        - name: logs
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

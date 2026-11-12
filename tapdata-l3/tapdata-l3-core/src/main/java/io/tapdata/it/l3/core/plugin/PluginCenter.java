@@ -149,7 +149,7 @@ public class PluginCenter {
             t.setDaemon(true);
             return t;
         });
-        log.info("[PluginCenter] actionLoadPool created (concurrency={})", c);
+        log.debug("[PluginCenter] actionLoadPool created (concurrency={})", c);
 
         Path pluginsDir = Path.of(properties.getPluginsDir());
         try {
@@ -213,7 +213,7 @@ public class PluginCenter {
         // 2. 有坐标 → loadPlugin（coordinateCache 命中则复用 CL 重新注册，新坐标则下载）
         //    registerInternal 内部 registry.put 会覆盖同名已有 action
         if (coordinate != null) {
-            log.info("[PluginCenter] Loading step '{}' from Maven coord {} (explicit={}, registry={})",
+            log.debug("[PluginCenter] Loading step '{}' from Maven coord {} (explicit={}, registry={})",
                     actionName, coordinate, explicitCoord != null,
                     explicitCoord == null && defaultRegistry.containsKey(actionName));
             loadPlugin(coordinate);
@@ -306,7 +306,7 @@ public class PluginCenter {
         int jarFreshDownload = 0, jarCached = 0;
 
         // 2. 并发触发 getOrLoadAction（每个 action 一个 CompletableFuture）
-        log.info("[Preload] Preloading {} unique step action(s) with {} threads...",
+        log.debug("[Preload] Preloading {} action(s) with {} threads",
                 toLoad.size(), properties.getDownloadConcurrency());
 
         List<CompletableFuture<Void>> actionFutures = new ArrayList<>();
@@ -314,7 +314,7 @@ public class PluginCenter {
             CompletableFuture<Void> f = CompletableFuture.runAsync(() -> {
                 boolean wasLoaded = registry.containsKey(info.action);
                 boolean inRegistry = isInDefaultRegistry(info.action);
-                log.info("[Preload] ▶ action={} (builtin={}, registry={}, use={})",
+                log.debug("[Preload] action={} (builtin={}, registry={}, use={})",
                         info.action, wasLoaded, inRegistry,
                         info.explicitCoord != null ? "yes" : "no");
                 try {
@@ -322,7 +322,7 @@ public class PluginCenter {
                     if (!wasLoaded) info.freshDownload = true;
                     else info.freshDownload = false;
                     info.handler = handler;
-                    log.info("[Preload]   ✅ {} → {} (jar ready)", info.action,
+                    log.debug("[Preload] {} -> {} (jar ready)", info.action,
                             handler.getClass().getSimpleName());
                 } catch (PluginLoadException e) {
                     synchronized (errors) {
@@ -359,20 +359,20 @@ public class PluginCenter {
 
         int runtimeJarCount = 0;
         if (!allRuntimeDeps.isEmpty()) {
-            log.info("[Preload] Resolving {} unique runtime dep coord(s) (including transitive): {}",
+            log.debug("[Preload] Resolving {} unique runtime dep coord(s) (including transitive): {}",
                     allRuntimeDeps.size(), allRuntimeDeps);
             try {
                 List<java.nio.file.Path> jars = mavenResolver.resolveWithDependencies(List.copyOf(allRuntimeDeps));
                 runtimeJarCount = jars.size();
                 for (java.nio.file.Path p : jars) {
-                    log.info("[Preload]   📦 {}", p.getFileName());
+                    log.debug("[Preload] dep jar: {}", p.getFileName());
                 }
             } catch (MavenPluginResolver.ResolutionException e) {
                 errors.add("runtime-deps: " + e.getMessage());
                 log.error("[Preload]   ❌ runtime deps resolution failed: {}", e.getMessage());
             }
         } else {
-            log.info("[Preload] No runtime dependencies declared.");
+            log.debug("[Preload] No runtime dependencies declared.");
         }
 
         // 4. 对每个已成功加载的 action 重建 classloader（注入全部 runtime deps）
@@ -386,13 +386,10 @@ public class PluginCenter {
         }
 
         // 5. 汇总报告
-        log.info("================================================================");
-        log.info("[Preload] Summary:");
-        log.info("  📥 Fresh JAR downloads : {}", jarFreshDownload);
-        log.info("  ♻️  Cached JARs (builtin): {}", jarCached);
-        log.info("  📦 Runtime dep JARs    : {} ({} unique coords)", runtimeJarCount, allRuntimeDeps.size());
-        log.info("  ❌ Errors              : {}", errors.size());
-        log.info("================================================================");
+        log.debug("[Preload] Done: {} action(s), {} runtime jar(s), {} error(s)",
+                toLoad.size(), runtimeJarCount, errors.size());
+        log.debug("[Preload] fresh JAR={}, cached JAR={}, runtime coords={}",
+                jarFreshDownload, jarCached, allRuntimeDeps.size());
 
         if (!errors.isEmpty()) {
             StringBuilder sb = new StringBuilder("[Preload] ").append(errors.size())
@@ -454,7 +451,7 @@ public class PluginCenter {
         // --- Fast path: CL 缓存命中 → 直接扫描注册（无锁，ConcurrentHashMap 本身线程安全）---
         if (coordinateCache.containsKey(coordinate)) {
             URLClassLoader cl = coordinateCache.get(coordinate);
-            log.info("[PluginCenter] Coordinate {} already cached, scanning handlers...", coordinate);
+            log.debug("[PluginCenter] Coordinate {} already cached, scanning handlers", coordinate);
             List<ActionHandler> handlers = findAllAndInstantiate(cl);
             if (handlers.isEmpty()) {
                 log.warn("[PluginCenter] Cached CL for {} has no usable ActionHandler, evicting cache", coordinate);
@@ -564,7 +561,8 @@ public class PluginCenter {
                 Path jar = mavenResolver.resolveArtifact(coord);
                 newDeps.add(jar);
             } catch (MavenPluginResolver.ResolutionException e) {
-                throw new PluginLoadException("Failed to resolve dep: " + coord, e);
+                // 保留 resolver 给出的关键错误信息（远程仓库、下载尝试、失败原因）
+                throw new PluginLoadException("Failed to resolve dep: " + e.getMessage(), e);
             }
         }
 
@@ -588,14 +586,19 @@ public class PluginCenter {
 
         // 4. 替换：更新 classLoaders 映射，关闭旧 CL（如果有）
         classLoaders.put(actionName, newCL);
+        // 同步更新 coordinateCache 中指向旧 CL 的条目 —— 否则后续 getOrLoadAction→loadPlugin
+        // 命中 coordinateCache 时会拿旧 CL（裸插件 jar，无 deps，且已被 close）重新注册 handler，
+        // 把 registry 覆盖回无依赖版本，执行时 ClassNotFoundException（如 mysql 驱动）。
+        // 同一 coordinate 的多个 action 共享同一 CL，统一指向新 CL（URL 超集，安全）。
         if (oldCL != null) {
+            coordinateCache.replaceAll((coord, cl) -> cl == oldCL ? newCL : cl);
             try { oldCL.close(); } catch (Exception ignored) { /* Java 模块系统可能拒绝 */ }
         }
 
         // 5. 更新 deps 缓存
         loadedDepsPerAction.put(actionName, Set.copyOf(merged));
 
-        log.info("[PluginCenter] Step '{}' → created new CL with {} URL(s) ({}/{} jars from new deps)",
+        log.debug("[PluginCenter] Step '{}' → created new CL with {} URL(s) ({}/{} jars from new deps)",
                 actionName, urls.size(), newDeps.size(), merged.size());
         return newDeps.size();
     }
@@ -689,18 +692,18 @@ public class PluginCenter {
 
     @PostConstruct
     public void init() {
-        log.info("[PluginCenter] Initializing (pluginsDir={}, localRepo={}, remoteRepos={})",
+        log.debug("[PluginCenter] Initializing (pluginsDir={}, localRepo={}, remoteRepos={})",
                 properties.getPluginsDir(), properties.getLocalRepoDir(), properties.getRemoteRepos());
 
         // 1. 注册内置 Step —— 通过 classpath 扫描 ActionHandler 实现（零 Spring 注解依赖）
         int builtInCount = registerBuiltInHandlers();
-        log.info("[PluginCenter] Registered {} built-in step handler(s) (classpath scan)", builtInCount);
+        log.debug("[PluginCenter] Registered {} built-in step handler(s) (classpath scan)", builtInCount);
 
         // 2. PF4J legacy — 扫描 plugin.properties 插件包
         pluginManager.loadPlugins();
         pluginManager.startPlugins();
         List<PluginWrapper> installed = pluginManager.getPlugins();
-        log.info("[PluginCenter] Found {} PF4J plugin(s) in {}", installed.size(), properties.getPluginsDir());
+        log.debug("[PluginCenter] Found {} PF4J plugin(s) in {}", installed.size(), properties.getPluginsDir());
 
         int pf4jCount = 0;
         for (PluginWrapper wrapper : installed) {
@@ -710,8 +713,8 @@ public class PluginCenter {
         // 3. 加载默认注册表 — classpath:steps-registry.yaml
         loadDefaultRegistry();
 
-        log.info("[PluginCenter] Init complete: {} registered ({} built-in, {} PF4J, {} registry entries)",
-                registry.size(), builtInCount, pf4jCount, defaultRegistry.size());
+        log.info("Runtime ready: {} built-in, {} PF4J plugin(s), {} registry entrie(s)",
+                builtInCount, pf4jCount, defaultRegistry.size());
         if (!defaultRegistry.isEmpty()) {
             log.debug("[PluginCenter] Default registry: {}", defaultRegistry);
         }
@@ -726,7 +729,7 @@ public class PluginCenter {
     private void loadDefaultRegistry() {
         ClassPathResource resource = new ClassPathResource(REGISTRY_CLASSPATH);
         if (!resource.exists()) {
-            log.info("[PluginCenter] Default registry '{}' not found on classpath — no external steps auto-load mapping",
+            log.debug("[PluginCenter] Default registry '{}' not found on classpath — no external steps auto-load mapping",
                     REGISTRY_CLASSPATH);
             return;
         }
@@ -736,7 +739,7 @@ public class PluginCenter {
             if (yaml != null) {
                 yaml.forEach((action, coord) -> defaultRegistry.put(action, coord.toString()));
             }
-            log.info("[PluginCenter] Loaded {} entry(ies) from default registry '{}'",
+            log.debug("[PluginCenter] Loaded {} entry(ies) from default registry '{}'",
                     defaultRegistry.size(), REGISTRY_CLASSPATH);
         } catch (Exception e) {
             log.warn("[PluginCenter] Failed to parse default registry '{}': {}", REGISTRY_CLASSPATH, e.getMessage());
@@ -745,7 +748,7 @@ public class PluginCenter {
 
     @PreDestroy
     public void shutdown() {
-        log.info("[PluginCenter] Shutting down...");
+        log.debug("[PluginCenter] Shutting down...");
 
         // 1. PF4J legacy
         pluginManager.stopPlugins();
@@ -773,7 +776,7 @@ public class PluginCenter {
         try { actionLoadPool.awaitTermination(5, TimeUnit.SECONDS); } catch (InterruptedException ignored) { }
         mavenResolver.shutdown();
         loadedDepsPerAction.clear();
-        log.info("[PluginCenter] Shutdown complete (coordinateCache + loadedDepsPerAction cleared)");
+        log.debug("[PluginCenter] Shutdown complete (coordinateCache + loadedDepsPerAction cleared)");
     }
 
     // ==================== 内部方法 ====================
@@ -814,7 +817,7 @@ public class PluginCenter {
         if (cl != null) classLoaders.put(actionName, cl);
 
         if (existing != null) {
-            log.warn("[PluginCenter] Step '{}' from '{}' overrides existing from '{}'",
+            log.debug("[PluginCenter] Step '{}' from '{}' overrides existing from '{}'",
                     actionName, source, existing.clazz().getSimpleName());
             return false;
         }

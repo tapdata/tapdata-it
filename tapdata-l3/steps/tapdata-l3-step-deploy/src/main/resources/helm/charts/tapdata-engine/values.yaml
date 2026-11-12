@@ -1,0 +1,67 @@
+global:
+  mongodb:
+    replicaSetName: tapdata-mongodb
+    protocol: mongodb
+    user: root
+    password: AbcDef123
+    authSource: admin
+    database: tapdata
+    hosts: "tapdata-mongodb-0.tapdata-mongodb-svc:27017,tapdata-mongodb-1.tapdata-mongodb-svc:27017,tapdata-mongodb-2.tapdata-mongodb-svc:27017"
+  imagePullSecret:
+    enabled: false
+    name: registry-auth
+    registry: ""
+    username: ""
+    password: ""
+  imagePullSecrets: []
+
+replicaCount: 2
+
+image:
+  repository: tapdata8/tapdata
+  tag: latest
+  pullPolicy: IfNotPresent
+
+nameOverride: ""
+fullnameOverride: ""
+
+resources:
+  limits:
+    cpu: 2000m
+    memory: 4Gi
+  requests:
+    cpu: 500m
+    memory: 2Gi
+
+env:
+  module: backend
+  backendUrl: "http://tapdata-server-svr:3030/api/"
+  javaVersion: java17
+  tz: Asia/Shanghai
+  licenseHost: "113.98.206.142:18080"
+
+podAnnotations: {}
+
+# 启动探针 —— 确认 tapdata-agent.jar 进程已拉起后才允许 liveness 生效，
+# 避免 Engine 冷启动（需先等 TM 就绪）被 liveness 误杀。
+# 窗口 = periodSeconds × failureThreshold = 10s × 90 = 900s。
+startupProbe:
+  enabled: true
+  exec:
+    command:
+      - sh
+      - -c
+      - pgrep -f '/tapdata/apps/components/tapdata-agent.jar'
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 90
+
+podSecurityContext: {}
+
+securityContext: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

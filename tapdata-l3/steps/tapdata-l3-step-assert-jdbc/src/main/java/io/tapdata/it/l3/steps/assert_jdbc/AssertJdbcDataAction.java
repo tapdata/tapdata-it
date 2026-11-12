@@ -84,7 +84,8 @@ public class AssertJdbcDataAction extends BaseStep {
         return List.of(
                 "mysql:mysql-connector-java:8.0.29",
                 "org.mariadb.jdbc:mariadb-java-client:3.3.3",
-                "org.postgresql:postgresql:42.1.4",
+                // 42.7.3 — dbforge 提供 postgres:16，默认 SCRAM-SHA-256 认证，42.1.4 不支持
+                "org.postgresql:postgresql:42.7.3",
                 "org.xerial:sqlite-jdbc:3.45.3.0",
                 "com.clickhouse:clickhouse-jdbc:0.4.6",
                 "com.oracle.database.jdbc:ojdbc11:23.3.0.23.09",
@@ -170,7 +171,11 @@ public class AssertJdbcDataAction extends BaseStep {
         for (int attempt = 1; attempt <= maxAttempts; attempt++) {
             try {
                 List<Map<String, Object>> rows = executeQuery(p.getJdbcUrl(), p.getUsername(), p.getPassword(), p.getSql());
-                evaluateAssertion(assertMode, rows, expectedCount, expectedMin, expectedValue, column);
+                // Integer → int 拆箱保护：缺省传 -1，由 evaluateAssertion 内部按 mode 校验 "required"
+                evaluateAssertion(assertMode, rows,
+                        expectedCount != null ? expectedCount : -1,
+                        expectedMin != null ? expectedMin : -1,
+                        expectedValue, column);
 
                 long elapsedMs = System.currentTimeMillis() - t0;
                 log.info("[AssertJDBC] PASSED after {} attempt(s) ({}ms)", attempt, elapsedMs);
