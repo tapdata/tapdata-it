@@ -221,6 +221,24 @@ class MavenPluginResolverTest {
         }
 
         @Test
+        @DisplayName("Validate all coordinates before starting any download")
+        void invalidBatchDoesNotStartDownloads(@TempDir Path tempRepo) {
+            List<String> downloads = new java.util.ArrayList<>();
+            MavenPluginResolver recordingResolver = new MavenPluginResolver(tempRepo.toString(), null) {
+                @Override
+                public Path resolveArtifact(String coordinate) throws ResolutionException {
+                    downloads.add(coordinate);
+                    throw new ResolutionException("Unexpected download: " + coordinate);
+                }
+            };
+            ResolutionException ex = assertThrows(ResolutionException.class,
+                    () -> recordingResolver.resolveWithDependencies(
+                            List.of("com.example:valid:1.0", "bad-coordinate")));
+            assertTrue(ex.getMessage().contains("Bad coordinate"));
+            assertTrue(downloads.isEmpty(), "Invalid input must fail before submitting downloads");
+        }
+
+        @Test
         @DisplayName("重复坐标去重 — 只解析一次")
         void duplicateCoordinatesDeduplicated() throws ResolutionException {
             // 这里传入一个重复坐标 + 一个不存在的坐标
