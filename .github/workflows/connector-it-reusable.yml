@@ -33,9 +33,27 @@ on:
         required: false
         type: string
         default: ''
+      dbforge_connectors:
+        description: 'Comma-separated modules using DBForge; other modules retain JSON configuration'
+        required: false
+        type: string
+        default: ''
+      excluded_connectors:
+        description: 'Comma-separated IT modules without a configured test service; reported in analyze output'
+        required: false
+        type: string
+        default: ''
+      dbforge_url:
+        description: 'DBForge API reachable from the test runner'
+        required: false
+        type: string
+        default: ''
     secrets:
       MAVEN_SETTINGS:
         description: '可选：私有 Nexus 需要认证时注入的 ~/.m2/settings.xml 内容'
+        required: false
+      CONNECTOR_IT_DBFORGE_TOKEN:
+        description: 'DBForge API token, required for modules in dbforge_connectors'
         required: false
 
 jobs:
@@ -57,6 +75,7 @@ jobs:
         shell: bash
         env:
           CONNECTORS_OVERRIDE: ${{ inputs.connectors_override }}
+          EXCLUDED_CONNECTORS: ${{ inputs.excluded_connectors }}
           COMMON_STRATEGY: ${{ inputs.common_changed_strategy }}
           EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
@@ -225,6 +244,10 @@ jobs:
                   except (ET.ParseError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
                       print("Dependency analysis incomplete; conservatively running all IT:", error)
                       selected = sorted(candidates)
+              excluded = {module.strip() for module in os.environ.get("EXCLUDED_CONNECTORS", "").split(",") if module.strip()}
+              validate_modules(excluded)
+              print("Excluded IT modules (test service unavailable):", json.dumps(sorted(set(selected) & excluded)))
+              selected = [module for module in selected if module not in excluded]
               print("Selected IT modules:", json.dumps(selected))
               with open(os.environ["GITHUB_OUTPUT"], "a") as output:
                   output.write("connectors=" + json.dumps(selected, separators=(",", ":")) + "\n")
@@ -295,6 +318,34 @@ jobs:
           SAFE="$(printf '%s' "$CONNECTOR" | tr '/' '-')"
           echo "safe=${SAFE}" >> "$GITHUB_OUTPUT"
           echo "label=${SAFE}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure integration test connection source
+        shell: bash
+        env:
+          CONNECTOR: ${{ matrix.connector }}
+          DBFORGE_CONNECTORS: ${{ inputs.dbforge_connectors }}
+          CONNECTOR_IT_DBFORGE_URL: ${{ inputs.dbforge_url }}
+          CONNECTOR_IT_DBFORGE_TOKEN: ${{ secrets.CONNECTOR_IT_DBFORGE_TOKEN }}
+        run: |
+          # BEGIN IT connection configuration
+          python3 - <<'PY'
+          import os
+
+          modules = {module.strip() for module in os.environ.get("DBFORGE_CONNECTORS", "").split(",") if module.strip()}
+          source = "dbforge" if os.environ["CONNECTOR"] in modules else "json"
+          if source == "dbforge":
+              for name in ("CONNECTOR_IT_DBFORGE_URL", "CONNECTOR_IT_DBFORGE_TOKEN"):
+                  if not os.environ.get(name, "").strip():
+                      raise SystemExit("::error::Missing CI setting: " + name)
+          with open(os.environ["GITHUB_ENV"], "a") as output:
+              output.write("CONNECTOR_IT_CONFIG_SOURCE=" + source + "\n")
+          print("IT connection source=" + source)
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("- Connection source: `" + source + "`\n")
+              if source == "dbforge":
+                  summary.write("- Dedicated database lease, internal cluster endpoints; managed-service/PXC modules validate compatible base engines.\n")
+          PY
+          # END IT connection configuration
 
       # 检查 JDK 可用性：runner 镜像已预装 JDK 17（/usr/java/jdk-17.0.12），
       # 不使用 actions/setup-java 下载安装；每个 Runner 使用独立的持久化 Maven 本地仓库。
@@ -409,6 +460,11 @@ jobs:
       # -DskipITs=false 覆盖各 connector pom 中默认的 skipITs=true；SSL 参数同上
       - name: Run integration tests
         uses: tapdata/tapdata-it/.github/actions/maven-retry@main
+        env:
+          CONNECTOR_IT_DBFORGE_URL: ${{ inputs.dbforge_url }}
+          CONNECTOR_IT_DBFORGE_TOKEN: ${{ secrets.CONNECTOR_IT_DBFORGE_TOKEN }}
+          CONNECTOR_IT_DBFORGE_ENDPOINT_SCOPE: internal
+          CONNECTOR_IT_DBFORGE_TTL_MINUTES: '60'
         with:
           working-directory: ${{ matrix.connector }}
           args: |
