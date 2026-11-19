@@ -42,7 +42,7 @@ spec:
 
               printf '%s\n' "$RSYNC_PASSWORD" > /tmp/rsync.passwd
               # Protect private runner caches even if this one-time seed job is rerun.
-              rsync -a --delete --exclude='/_runner-cache/' --password-file=/tmp/rsync.passwd \
+              rsync -a --delete --exclude='/_runner-cache/' --exclude='*.lastUpdated' --password-file=/tmp/rsync.passwd \
                 rsync://root@fileserver.tapdata.net:873/data/enterprise-temp/tapdata/ /root/.m2/
               rsync -a --delete --password-file=/tmp/rsync.passwd \
                 rsync://root@fileserver.tapdata.net:873/data/build-temp/ /root/.pkg-cache/v3.4/

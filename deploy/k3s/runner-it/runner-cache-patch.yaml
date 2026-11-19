@@ -22,6 +22,10 @@ spec:
                   [[ "$(basename "$item")" == _runner-cache ]] && continue
                   cp -a --reflink=auto "$item" "$target/"
                 done
+                # Only clean the new Pod's copy. The PVC baseline is shared.
+                if [[ -d "$target/repository" ]]; then
+                  find -P "$target/repository" -type f -name '*.lastUpdated' -delete
+                fi
                 touch "$target/.seeded"
               fi
               python3 - "$target/settings.xml" <<'PY'
