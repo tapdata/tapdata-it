@@ -10,13 +10,25 @@ class DependencyInstallTest(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/connector-it-reusable.yml").read_text()
         self.assertNotIn("common-modules", workflow)
         self.assertNotIn("Install connectors-common modules", workflow)
-        installs = [step for step in workflow.split("      - name: ")[1:]
-                    if "            install\n" in step]
-        self.assertEqual(1, len(installs))
-        self.assertTrue(installs[0].startswith("Install dependency chain (skip all tests)\n"))
-        self.assertIn("            -pl\n            ${{ matrix.connector }}\n            -am\n", installs[0])
-        self.assertIn("            -DskipTests\n", installs[0])
-        self.assertIn("            -DskipITs=true\n", installs[0])
+        steps = workflow.split("      - name: ")[1:]
+        installs = [step for step in steps if "            install\n" in step]
+        self.assertEqual(
+            ["Install pinned SQL core", "Install dependency chain (skip all tests)"],
+            [step.splitlines()[0] for step in installs],
+        )
+        bootstrap, target = installs
+        checkout = next(step for step in steps if step.startswith("Check out pinned SQL core\n"))
+        for step in (checkout, bootstrap):
+            self.assertIn("if: inputs.install_enterprise_sql_core && github.repository == 'tapdata/tapdata-connectors-enterprise'", step)
+        self.assertIn("repository: tapdata/tapdata-connectors\n", checkout)
+        self.assertIn("ref: 5ec89e425667ee8993c306391e7f92264f9f1748\n", checkout)
+        self.assertIn("persist-credentials: false", checkout)
+        self.assertIn("path: .ci-deps/tapdata-connectors\n", checkout)
+        self.assertIn("working-directory: .ci-deps/tapdata-connectors\n", bootstrap)
+        self.assertIn("            -pl\n            connectors-common/sql-core\n            -am\n", bootstrap)
+        self.assertIn("            -pl\n            ${{ matrix.connector }}\n            -am\n", target)
+        self.assertIn("            -DskipTests\n", target)
+        self.assertIn("            -DskipITs=true\n", target)
         integration = workflow.split("      - name: Run integration tests\n", 1)[1]
         self.assertIn("working-directory: ${{ matrix.connector }}", integration)
         self.assertIn("failsafe:integration-test", integration)
