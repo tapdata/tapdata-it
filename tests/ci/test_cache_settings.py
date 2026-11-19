@@ -90,6 +90,41 @@ class MergeTest(unittest.TestCase):
         self.assertIn("tapdata-nexus", BASE)
 
 
+class SeedTest(unittest.TestCase):
+    def test_pod_seed_filters_only_new_private_cache(self):
+        source = (ROOT / "deploy/k3s/runner-it/runner-cache-patch.yaml").read_text()
+        seed = source.split("            - |\n", 1)[1].split('python3 - "$target/settings.xml"', 1)[0]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            protected = root / "repository"
+            protected.mkdir()
+            stale = protected / "probe.jar.lastUpdated"
+            stale.write_text("failure marker")
+            (protected / "probe.jar").write_text("artifact")
+            (protected / "_remote.repositories").write_text("origin")
+            seed = textwrap.dedent(seed).replace("/maven-cache", str(root))
+            # The fixture works with both BSD and GNU cp.
+            seed = seed.replace("cp -a --reflink=auto", "cp -a")
+            env = dict(os.environ, POD_NAME="test-pod")
+            subprocess.run(["bash", "-ec", seed], env=env, check=True)
+
+            target = root / "_runner-cache/test-pod"
+            self.assertTrue((target / ".seeded").is_file())
+            self.assertEqual("artifact", (target / "repository/probe.jar").read_text())
+            self.assertEqual("origin", (target / "repository/_remote.repositories").read_text())
+            self.assertFalse((target / "repository/probe.jar.lastUpdated").exists())
+            self.assertTrue(stale.is_file())
+            (target / "repository/probe.jar.lastUpdated").write_text("private failure")
+            subprocess.run(["bash", "-ec", seed], env=env, check=True)
+            self.assertTrue((target / "repository/probe.jar.lastUpdated").is_file())
+
+    def test_file_server_restore_filters_failed_lookups(self):
+        source = (ROOT / "deploy/k3s/runner-it/runner-cache-sync-job.yaml").read_text()
+        restore = next(line for line in source.splitlines() if "rsync -a --delete --exclude=" in line)
+        self.assertIn("--exclude='*.lastUpdated'", restore)
+        self.assertIn("--exclude='/_runner-cache/'", restore)
+
+
 class PruneTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

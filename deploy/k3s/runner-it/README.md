@@ -160,3 +160,6 @@ Do not rerun it with active runners: it replaces shared baseline/pkg/source
 data and does not refresh already seeded private Maven repositories.
 The Maven rsync explicitly excludes `/_runner-cache/`, so an accidental rerun
 does not delete existing runner-private caches. Do not add `--delete-excluded`.
+Maven's `*.lastUpdated` files are excluded from the file-server restore and
+removed from a new Pod's copy before it is marked seeded. Existing Pod caches
+are unaffected by this initialization step.
