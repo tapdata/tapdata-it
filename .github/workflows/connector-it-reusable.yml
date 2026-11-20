@@ -28,6 +28,10 @@ on:
         required: false
         type: string
         default: 'affected'
+      install_enterprise_sql_core:
+        description: 'Build the pinned OSS sql-core in the enterprise connector test job'
+        type: boolean
+        default: false
       connectors_override:
         description: '手工指定模块列表（逗号分隔的模块相对路径），跳过 diff 分析；用于 workflow_dispatch 调试'
         required: false
@@ -433,6 +437,28 @@ jobs:
           fi
           # 自托管 runner 环境：内网 Nexus 使用自签名证书，跳过 SSL 验证
           echo "MAVEN_OPTS=-Dmaven.wagon.http.ssl.insecure=true -Dmaven.wagon.http.ssl.allowall=true" >> "$GITHUB_ENV"
+
+      - name: Check out pinned SQL core
+        if: inputs.install_enterprise_sql_core && github.repository == 'tapdata/tapdata-connectors-enterprise'
+        uses: actions/checkout@v4
+        with:
+          repository: tapdata/tapdata-connectors
+          ref: 5ec89e425667ee8993c306391e7f92264f9f1748
+          path: .ci-deps/tapdata-connectors
+          persist-credentials: false
+
+      - name: Install pinned SQL core
+        if: inputs.install_enterprise_sql_core && github.repository == 'tapdata/tapdata-connectors-enterprise'
+        uses: tapdata/tapdata-it/.github/actions/maven-retry@main
+        with:
+          working-directory: .ci-deps/tapdata-connectors
+          args: |
+            -B
+            install
+            -pl
+            connectors-common/sql-core
+            -am
+            -Dmaven.test.skip=true
 
       # Only build the target connector and its Maven reactor dependencies.
       # Skip tests here; the following step runs IT for the target module only.
