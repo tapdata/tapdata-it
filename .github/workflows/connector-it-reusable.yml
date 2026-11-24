@@ -446,6 +446,15 @@ jobs:
           ref: 5ec89e425667ee8993c306391e7f92264f9f1748
           path: .ci-deps/tapdata-connectors
           persist-credentials: false
+          # Keep every POM so Maven can collect the reactor before applying -pl.
+          # Fetch blobs only for the SQL core dependency chain; unrelated connector
+          # binaries make full checkouts unreliable over the runner's SOCKS proxy.
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            **/pom.xml
+            /.mvn/
+            /connectors-common/connector-core/
+            /connectors-common/sql-core/
 
       - name: Install pinned SQL core
         if: inputs.install_enterprise_sql_core && github.repository == 'tapdata/tapdata-connectors-enterprise'
