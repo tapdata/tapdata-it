@@ -189,6 +189,13 @@ public class AssertJdbcDataAction extends BaseStep {
                 if (attempt < maxAttempts && pollIntervalSec > 0) {
                     Thread.sleep(Duration.ofSeconds(pollIntervalSec).toMillis());
                 }
+            } catch (java.sql.SQLException e) {
+                // 全量同步进行中目标表可能还没建出来 —— 这类 SQL 异常按"还没就绪"处理，继续轮询。
+                lastFailure = new AssertionFailedException(
+                        "SQL error while asserting (attempt " + attempt + "/" + maxAttempts + "): " + e.getMessage());
+                if (attempt < maxAttempts && pollIntervalSec > 0) {
+                    Thread.sleep(Duration.ofSeconds(pollIntervalSec).toMillis());
+                }
             }
         }
 

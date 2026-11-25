@@ -54,6 +54,12 @@ public class TmInspectParameter extends ParameterConfig {
     /** 要校验的表列表 — 如果为 null 校验任务中所有表. */
     private List<String> tables;
 
+    /**
+     * 校验比对时的排序/主键列。默认 {@code _id}（MongoDB 默认主键）；
+     * MySQL / PG 等关系库必须显式传真实主键列（如 {@code id}），否则 inspect 会直接 status=error。
+     */
+    private String sortColumn = "_id";
+
     /** 原始 InspectDto JSON — 完全自定义. 优先级最高. */
     private Map<String, Object> rawInspectConfig;
 

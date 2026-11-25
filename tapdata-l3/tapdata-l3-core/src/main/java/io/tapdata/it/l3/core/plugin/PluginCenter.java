@@ -713,7 +713,8 @@ public class PluginCenter {
         // 3. 加载默认注册表 — classpath:steps-registry.yaml
         loadDefaultRegistry();
 
-        log.info("Runtime ready: {} built-in, {} PF4J plugin(s), {} registry entrie(s)",
+        log.info("Runtime ready: {} built-in handler(s) from classpath scan, {} PF4J plugin handler(s), " +
+                        "{} declarative registry entrie(s) (steps-registry.yaml — lazy-loaded from Maven, not yet registered)",
                 builtInCount, pf4jCount, defaultRegistry.size());
         if (!defaultRegistry.isEmpty()) {
             log.debug("[PluginCenter] Default registry: {}", defaultRegistry);

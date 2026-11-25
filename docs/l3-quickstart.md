@@ -47,7 +47,7 @@ java -jar tapdata-l3/tapdata-l3-cli/target/tapdata-l3-cli-fat.jar \
 # 准备测试目录（只需 fat jar + cases）
 mkdir -p /tmp/l3-quickstart/cases
 cp tapdata-l3/tapdata-l3-cli/target/tapdata-l3-cli-fat.jar /tmp/l3-quickstart/
-cp docs/cases/c1-smoke-test.yaml /tmp/l3-quickstart/cases/
+cp tapdata-l3/tapdata-l3-cli/src/test/resources/cases/c1-smoke-test.yaml /tmp/l3-quickstart/cases/
 
 # 启动干净容器
 docker run --rm --network host \
@@ -209,7 +209,7 @@ java -version  # 必须 17+
 
 ## 下一步
 
-1. 复制 `docs/cases/c1-smoke-test.yaml` 为 `my-first-case.yaml`
+1. 复制 `tapdata-l3/tapdata-l3-cli/src/test/resources/cases/c1-smoke-test.yaml` 为 `my-first-case.yaml`
 2. 修改 `case_id` 和 `message`，运行 `run --case-ids=MY-FIRST`
 3. 尝试加入 `dbforge_create_database`，观察自动下载过程
 4. 查看生成的报告：`reports/<timestamp>/report.html`

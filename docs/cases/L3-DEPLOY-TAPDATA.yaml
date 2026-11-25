@@ -13,7 +13,7 @@ steps:
       customer: "tapdata-it"
       reason: "L3 deploy e2e test"
       valid_days: 30
-      version: "4.23.0"
+      version: "4.25.0"
       license_type: "OP"
       engine_limit: 3
     outputs: [license]
@@ -25,10 +25,16 @@ steps:
       host: "localhost"
       prebuilt_image: "192.168.1.184:5001/tapdata/tapdata-enterprise:latest"
       harbor_registry: "192.168.1.184:5001"
-      mongodb_uri: "mongodb://root:AbcDef123@mongo60-rs-headless.tapdata-db.svc.cluster.local:27017/tapdata?replicaSet=rs0&authSource=admin"
+      # 专用 database：TM 试用 License 的有效期 = min(license.expiresOn, 首次部署时间+14天)，
+      # 首次部署时间取自库内最早 Worker 的 _id。若复用共享 tapdata 库（最早 Worker 2026-08-03），
+      # 会立即被判过期（License is expired → TM 退出 → Pod 永不 Ready）。
+      mongodb_uri: "mongodb://root:AbcDef123@mongo60-rs-headless.tapdata-db.svc.cluster.local:27017/tapdata_l3_deploy?replicaSet=rs0&authSource=admin"
       mongodb_hosts: "mongo60-rs-0.mongo60-rs-headless.tapdata-db.svc.cluster.local:27017,mongo60-rs-1.mongo60-rs-headless.tapdata-db.svc.cluster.local:27017,mongo60-rs-2.mongo60-rs-headless.tapdata-db.svc.cluster.local:27017"
       mongodb_user: "root"
       mongodb_password: "AbcDef123"
+      # 必须显式指定：chart 用 hosts + database 拼接连接串，忽略 mongodb_uri 里的库名；
+      # 默认值 tapdata 是共享库（含 2026-08 的历史 Worker），会触发试用 License 14 天封顶判过期。
+      mongodb_database: "tapdata_l3_deploy"
       namespace: "tapdata-test"
       server_replicas: 1
       engine_replicas: 1
@@ -36,4 +42,4 @@ steps:
       license_host: "192.168.1.184:18080"
       license: "#{ #steps['fetch_license'].outputs['license'] }"
     outputs: [namespace, helmRelease, image]
-    timeout_seconds: 900
+    timeout_seconds: 1500

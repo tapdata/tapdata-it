@@ -33,7 +33,7 @@ steps:
       customer: "tapdata-it"
       reason: "L3 MySQL to PostgreSQL CDC golden path"
       valid_days: 30
-      version: "4.23.0"
+      version: "4.25.0"
       license_type: "OP"
       engine_limit: 3
     outputs: [license]
@@ -74,7 +74,7 @@ steps:
       host: "localhost"
       prebuilt_image: "192.168.1.184:5001/tapdata/tapdata-enterprise:latest"
       harbor_registry: "192.168.1.184:5001"
-      mongodb_uri: "mongodb://#{ #steps['create_mongo'].outputs['username'] }:#{ #steps['create_mongo'].outputs['password'] }@#{ #steps['create_mongo'].outputs['internal_host'] }:#{ #steps['create_mongo'].outputs['port'] }/#{ #steps['create_mongo'].outputs['database'] }?authSource=admin"
+      mongodb_uri: "mongodb://#{ #steps['create_mongo'].outputs['username'] }:#{ #steps['create_mongo'].outputs['password'] }@#{ #steps['create_mongo'].outputs['internal_host'] }:#{ #steps['create_mongo'].outputs['internal_port'] }/#{ #steps['create_mongo'].outputs['database'] }?authSource=admin"
       mongodb_user: "#{ #steps['create_mongo'].outputs['username'] }"
       mongodb_password: "#{ #steps['create_mongo'].outputs['password'] }"
       mongodb_database: "#{ #steps['create_mongo'].outputs['database'] }"
@@ -87,7 +87,8 @@ steps:
       license_host: "192.168.1.184:18080"
       license: "#{ #steps['fetch_license'].outputs['license'] }"
     outputs: [namespace, helmRelease]
-    timeout_seconds: 900
+    # TM 冷启动实测 8~13 分钟，900s 不够
+    timeout_seconds: 1500
 
   # ============================================================
   # 4. 暴露 TM API → NodePort 30322
@@ -194,7 +195,7 @@ steps:
       host: "localhost"
       namespace: "tapdata-l3-f01"
       pod: "tapdata-tapdata-engine"
-      command: "cd /tapdata/apps/lib && for j in /tapdata/apps/dist/*.jar; do echo \">> deploying $j\"; timeout 180 java \"-Dtapdata_proxy_mongodb_uri=mongodb://#{ #steps['create_mongo'].outputs['username'] }:#{ #steps['create_mongo'].outputs['password'] }@#{ #steps['create_mongo'].outputs['internal_host'] }:#{ #steps['create_mongo'].outputs['port'] }/#{ #steps['create_mongo'].outputs['database'] }?authSource=admin\" -jar pdk-deploy.jar register -a 3324cfdf-7d3e-4792-bd32-571638d4562f -t http://tapdata-server-svr.tapdata-l3-f01.svc.cluster.local:3030 \"$j\" 2>&1 | tail -5; done; curl -s -m 15 -o /dev/null -w \"init_http:%{http_code}\" http://tapdata-server-svr.tapdata-l3-f01.svc.cluster.local:3030/api/init; echo; echo DEPLOY_DONE"
+      command: "cd /tapdata/apps/lib && for j in /tapdata/apps/dist/*.jar; do echo \">> deploying $j\"; timeout 180 java \"-Dtapdata_proxy_mongodb_uri=mongodb://#{ #steps['create_mongo'].outputs['username'] }:#{ #steps['create_mongo'].outputs['password'] }@#{ #steps['create_mongo'].outputs['internal_host'] }:#{ #steps['create_mongo'].outputs['internal_port'] }/#{ #steps['create_mongo'].outputs['database'] }?authSource=admin\" -jar pdk-deploy.jar register -a 3324cfdf-7d3e-4792-bd32-571638d4562f -t http://tapdata-server-svr.tapdata-l3-f01.svc.cluster.local:3030 \"$j\" 2>&1 | tail -5; done; curl -s -m 15 -o /dev/null -w \"init_http:%{http_code}\" http://tapdata-server-svr.tapdata-l3-f01.svc.cluster.local:3030/api/init; echo; echo DEPLOY_DONE"
       expect_stdout_contains: "DEPLOY_DONE"
     timeout_seconds: 620
 
@@ -232,7 +233,7 @@ steps:
       database_type: "Mysql"
       connection_type: "source_and_target"
       database_host: "#{ #steps['create_src_db'].outputs['internal_host'] }"
-      database_port: "#{ #steps['create_src_db'].outputs['port'] }"
+      database_port: "#{ #steps['create_src_db'].outputs['internal_port'] }"
       database_username: "#{ #steps['create_src_db'].outputs['username'] }"
       database_password: "#{ #steps['create_src_db'].outputs['password'] }"
       database_name: "#{ #steps['create_src_db'].outputs['database'] }"
@@ -246,7 +247,7 @@ steps:
       database_type: "Postgres"
       connection_type: "source_and_target"
       database_host: "#{ #steps['create_tgt_db'].outputs['internal_host'] }"
-      database_port: "#{ #steps['create_tgt_db'].outputs['port'] }"
+      database_port: "#{ #steps['create_tgt_db'].outputs['internal_port'] }"
       database_username: "#{ #steps['create_tgt_db'].outputs['username'] }"
       database_password: "#{ #steps['create_tgt_db'].outputs['password'] }"
       database_name: "#{ #steps['create_tgt_db'].outputs['database'] }"
@@ -417,6 +418,8 @@ steps:
       inspect_mode: "all"
       inspect_method: "value"
       inspect_difference_mode: "All"
+      # MySQL 源表主键是 id（镜像默认 _id 属于 MongoDB）
+      sort_column: "id"
     outputs: [inspect_id]
 
   - id: "run_inspect"

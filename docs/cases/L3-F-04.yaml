@@ -32,7 +32,7 @@ steps:
       customer: "tapdata-it"
       reason: "L3 data verification (VDC) e2e test"
       valid_days: 30
-      version: "4.23.0"
+      version: "4.25.0"
       license_type: "OP"
       engine_limit: 3
     outputs: [license]
@@ -73,7 +73,7 @@ steps:
       host: "localhost"
       prebuilt_image: "192.168.1.184:5001/tapdata/tapdata-enterprise:latest"
       harbor_registry: "192.168.1.184:5001"
-      mongodb_uri: "mongodb://#{ #steps['create_mongo'].outputs['username'] }:#{ #steps['create_mongo'].outputs['password'] }@#{ #steps['create_mongo'].outputs['internal_host'] }:#{ #steps['create_mongo'].outputs['port'] }/#{ #steps['create_mongo'].outputs['database'] }?authSource=admin"
+      mongodb_uri: "mongodb://#{ #steps['create_mongo'].outputs['username'] }:#{ #steps['create_mongo'].outputs['password'] }@#{ #steps['create_mongo'].outputs['internal_host'] }:#{ #steps['create_mongo'].outputs['internal_port'] }/#{ #steps['create_mongo'].outputs['database'] }?authSource=admin"
       mongodb_user: "#{ #steps['create_mongo'].outputs['username'] }"
       mongodb_password: "#{ #steps['create_mongo'].outputs['password'] }"
       mongodb_database: "#{ #steps['create_mongo'].outputs['database'] }"
@@ -86,7 +86,8 @@ steps:
       license_host: "192.168.1.184:18080"
       license: "#{ #steps['fetch_license'].outputs['license'] }"
     outputs: [namespace, helmRelease]
-    timeout_seconds: 900
+    # TM 冷启动实测 8~13 分钟，900s 不够
+    timeout_seconds: 1500
 
   # ============================================================
   # 4. 暴露 TM API → NodePort 30324
@@ -193,7 +194,7 @@ steps:
       host: "localhost"
       namespace: "tapdata-l3-f04"
       pod: "tapdata-tapdata-engine"
-      command: "cd /tapdata/apps/lib && for j in /tapdata/apps/dist/*.jar; do echo \">> deploying $j\"; timeout 180 java \"-Dtapdata_proxy_mongodb_uri=mongodb://#{ #steps['create_mongo'].outputs['username'] }:#{ #steps['create_mongo'].outputs['password'] }@#{ #steps['create_mongo'].outputs['internal_host'] }:#{ #steps['create_mongo'].outputs['port'] }/#{ #steps['create_mongo'].outputs['database'] }?authSource=admin\" -jar pdk-deploy.jar register -a 3324cfdf-7d3e-4792-bd32-571638d4562f -t http://tapdata-server-svr.tapdata-l3-f04.svc.cluster.local:3030 \"$j\" 2>&1 | tail -5; done; curl -s -m 15 -o /dev/null -w \"init_http:%{http_code}\" http://tapdata-server-svr.tapdata-l3-f04.svc.cluster.local:3030/api/init; echo; echo DEPLOY_DONE"
+      command: "cd /tapdata/apps/lib && for j in /tapdata/apps/dist/*.jar; do echo \">> deploying $j\"; timeout 180 java \"-Dtapdata_proxy_mongodb_uri=mongodb://#{ #steps['create_mongo'].outputs['username'] }:#{ #steps['create_mongo'].outputs['password'] }@#{ #steps['create_mongo'].outputs['internal_host'] }:#{ #steps['create_mongo'].outputs['internal_port'] }/#{ #steps['create_mongo'].outputs['database'] }?authSource=admin\" -jar pdk-deploy.jar register -a 3324cfdf-7d3e-4792-bd32-571638d4562f -t http://tapdata-server-svr.tapdata-l3-f04.svc.cluster.local:3030 \"$j\" 2>&1 | tail -5; done; curl -s -m 15 -o /dev/null -w \"init_http:%{http_code}\" http://tapdata-server-svr.tapdata-l3-f04.svc.cluster.local:3030/api/init; echo; echo DEPLOY_DONE"
       expect_stdout_contains: "DEPLOY_DONE"
     timeout_seconds: 620
 
@@ -230,7 +231,7 @@ steps:
       database_type: "Mysql"
       connection_type: "source_and_target"
       database_host: "#{ #steps['create_src_db'].outputs['internal_host'] }"
-      database_port: "#{ #steps['create_src_db'].outputs['port'] }"
+      database_port: "#{ #steps['create_src_db'].outputs['internal_port'] }"
       database_username: "#{ #steps['create_src_db'].outputs['username'] }"
       database_password: "#{ #steps['create_src_db'].outputs['password'] }"
       database_name: "#{ #steps['create_src_db'].outputs['database'] }"
@@ -244,7 +245,7 @@ steps:
       database_type: "Mysql"
       connection_type: "source_and_target"
       database_host: "#{ #steps['create_tgt_db'].outputs['internal_host'] }"
-      database_port: "#{ #steps['create_tgt_db'].outputs['port'] }"
+      database_port: "#{ #steps['create_tgt_db'].outputs['internal_port'] }"
       database_username: "#{ #steps['create_tgt_db'].outputs['username'] }"
       database_password: "#{ #steps['create_tgt_db'].outputs['password'] }"
       database_name: "#{ #steps['create_tgt_db'].outputs['database'] }"
@@ -310,7 +311,10 @@ steps:
     timeout_seconds: 700
     inputs:
       task_id: "#{ #steps['create_sync_task'].outputs['task_id'] }"
-      target_status: "complete"
+      # 必须等 "running"（任务运行中）而不是 "complete"：
+      # VDC 校验需要任务处于运行态才能被调度；任务 complete 后 inspect 会一直停在 scheduling。
+      # 全量落库是否完成由后面的 assert_jdbc_data 独立断言。
+      target_status: "running"
       poll_interval_ms: 5000
       wait_timeout_seconds: 600
     outputs: [final_status, reached_target]
@@ -362,6 +366,8 @@ steps:
       inspect_mode: "all"
       inspect_method: "value"
       inspect_difference_mode: "All"
+      # MySQL 表主键是 id（镜像默认 _id 属于 MongoDB），不指定会让 inspect 直接 status=error
+      sort_column: "id"
     outputs: [inspect_id]
 
   # ============================================================
@@ -382,7 +388,9 @@ steps:
       allow_mismatch: false
 
   # ============================================================
-  # 18. 造差异：目标端旁路插入一条源端不存在的行
+  # 18. 造差异：目标端旁路修改一条源端不存在的值
+  #     用 UPDATE 而非 INSERT —— value 模式按源端行比对字段值，
+  #     目标端多出的整行不会被计入差异，改值才能稳定检出。
   # ============================================================
   - id: "inject_mismatch"
     action: "dbforge_execute_sql"
@@ -391,7 +399,7 @@ steps:
       jdbc_url: "#{ #steps['create_tgt_db'].outputs['jdbc_url'] }"
       username: "#{ #steps['create_tgt_db'].outputs['username'] }"
       password: "#{ #steps['create_tgt_db'].outputs['password'] }"
-      sql: "INSERT INTO l3f04_orders (id, name, amount) VALUES (999999901, 'INJECTED_MISMATCH', 12345);"
+      sql: "UPDATE l3f04_orders SET amount = amount + 1000000 WHERE id = 1;"
     outputs: [affected_rows]
 
   # ============================================================
